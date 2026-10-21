@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: "2010-09-29"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Robot que descarga del portal del SRI los TXT de comprobantes electrónicos
+  recibidos y los publica en S3. Se ejecuta de forma programada dentro de la
+  ventana de 5 días que el SRI mantiene abierta para la descarga del TXT.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, prod]
+    Description: Etapa de despliegue.
+
+  ImageUri:
+    Type: String
+    Description: URI de la imagen en ECR (repo@sha256:...).
+
+  BucketName:
+    Type: String
+    Description: Bucket donde se guardan los TXT y los manifiestos.
+
+  SecretArn:
+    Type: String
+    NoEcho: true
+    Description: >
+      ARN del secreto de Secrets Manager con el JSON {"<ruc>": "<clave>"}.
+
+  ScheduleExpression:
+    Type: String
+    Default: "cron(0 9 1-5 * ? *)"
+    Description: >
+      Programación de EventBridge. El valor por defecto ejecuta el robot los
+      días 1 a 5 de cada mes, que es la ventana en la que el SRI permite
+      descargar el TXT del mes cerrado anterior.
+
+  MemorySize:
+    Type: Number
+    Default: 2048
+    MinValue: 1024
+    MaxValue: 10240
+    Description: Memoria de la función. Chromium necesita al menos 2 GB.
+
+  Timeout:
+    Type: Number
+    Default: 600
+    MinValue: 60
+    MaxValue: 900
+    Description: Tiempo máximo de ejecución.
+
+  LogRetentionInDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [7, 14, 30, 60, 90, 180, 365]
+
+Conditions:
+  IsProd: !Equals [!Ref Stage, "prod"]
+
+Resources:
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpirarTXT
+            Status: Enabled
+            ExpirationInDays: 2555
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  RobotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-${Stage}"
+      Description: Descarga los TXT de comprobantes recibidos del portal del SRI.
+      PackageType: Image
+      ImageUri: !Ref ImageUri
+      MemorySize: !Ref MemorySize
+      Timeout: !Ref Timeout
+      Architectures: [arm64]
+      EphemeralStorage:
+        Size: 2048
+      Environment:
+        Variables:
+          SRI_ROBOT_CONFIG: /opt/robot/config/robots.yaml
+          SRI_ROBOT_SELECTORS: /opt/robot/config/selectors.yaml
+          SRI_ROBOT_SECRETS_ARN: !Ref SecretArn
+          TZ: America/Guayaquil
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref SecretArn
+            - !If
+              - IsProd
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "${ResultsBucket.Arn}/*"
+              - !Ref AWS::NoValue
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+              Resource: !Sub "${ResultsBucket.Arn}/*"
+
+  RobotScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${AWS::StackName}-${Stage}-schedule"
+      Description: Ventana de descarga del TXT del SRI (días 1 a 5 del mes).
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt RobotFunction.Arn
+          Id: RobotFunction
+          Input: '{"periodo": ""}'
+
+  RobotSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt RobotFunction.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RobotScheduleRule.Arn
+
+  RobotLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${RobotFunction}"
+      RetentionInDays: !Ref LogRetentionInDays
+
+Outputs:
+  FunctionName:
+    Description: Nombre de la función Lambda.
+    Value: !Ref RobotFunction
+
+  FunctionArn:
+    Description: ARN de la función Lambda.
+    Value: !GetAtt RobotFunction.Arn
+
+  Bucket:
+    Description: Bucket con los TXT y los manifiestos.
+    Value: !Ref ResultsBucket
+
+  RuleArn:
+    Description: Regla de EventBridge que dispara el robot.
+    Value: !GetAtt RobotScheduleRule.Arn

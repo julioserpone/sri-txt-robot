@@ -1,0 +1,67 @@
+# Configuración del robot. Copie este archivo como config/robots.yaml.
+#
+# Los secretos NO se escriben aquí: use variables de entorno (${NOMBRE}) o el
+# nombre de una variable con 'passwordEnv'. En Lambda las credenciales se
+# leen de AWS Secrets Manager y se inyectan como variables de entorno.
+
+version: 1
+
+captcha:
+  # Clave de anti-captcha. Por defecto se lee de la variable de entorno
+  # indicada en 'api_key_env'.
+  api_url: "https://api.anti-captcha.com"
+  api_key_env: "ANTICAPTCHA_API_KEY"
+  # Tipos de tarea a probar, en orden de preferencia. El robot usa el primero
+  # que devuelva un token válido.
+  task_types:
+    - "RecaptchaV2EnterpriseTaskProxyless"
+    - "RecaptchaV2TaskProxyless"
+    - "RecaptchaV3EnterpriseTaskProxyless"
+    - "RecaptchaV3TaskProxyless"
+  poll_interval_seconds: 3
+  poll_timeout_seconds: 180
+  report_outcomes: true
+
+portal:
+  base_url: "https://srienlinea.sri.gob.ec"
+  login_url: "https://srienlinea.sri.gob.ec/tuportal-internet/"
+  headless: true
+  timeout_ms: 45000
+  navigation_timeout_ms: 60000
+  locale: "es-EC"
+  timezone: "America/Guayaquil"
+  # Si se deja vacío, Playwright usa el User-Agent del navegador empaquetado.
+  user_agent: ""
+  viewport_width: 1440
+  viewport_height: 900
+  download_dir: "/tmp/sri-downloads"
+
+storage:
+  # Bucket de S3 para los TXT y los manifiestos. Si está vacío se usa
+  # 'local_dir'.
+  bucket: ""
+  prefix: "sri/txt"
+  local_dir: "./datos"
+
+robots:
+  # Contribuyente persona jurídica (RUC de 13 dígitos: la clave del portal es
+  # el RUC y el 'ciAdicional' es el dígito verificador).
+  - ruc: "1790012345001"
+    password_env: "SRI_PASSWORD_1790012345001"
+    clave_adicional: "1"
+    etiqueta: "Contribuyente de prueba"
+    tipos:
+      - "01"   # Factura
+      - "03"   # Liquidación de compra de bienes y prestación de servicios
+      - "05"   # Nota de crédito
+      - "07"   # Nota de débito
+      - "08"   # Comprobantes de retención
+    activo: true
+
+  # Contribuyente persona natural (RUC de 10 dígitos: no necesita
+  # 'clave_adicional').
+  # - ruc: "1234567890"
+  #   password: "${SRI_PASSWORD_1234567890}"
+  #   etiqueta: "Persona natural"
+  #   tipos: ["01", "05"]
+  #   activo: false

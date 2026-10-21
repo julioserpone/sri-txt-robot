@@ -1,0 +1,110 @@
+# Selectores del portal del SRI.
+#
+# Cada entrada es una lista de alternativas: se usa la primera que resuelva a
+# un elemento visible. Así, un cambio menor del portal se corrige aquí, sin
+# tocar el código.
+#
+# Referencia técnica (verificada en octubre de 2026):
+#   - Login: Keycloak en /tuportal-internet/, acción
+#     /auth/realms/Internet/login-actions/authenticate.
+#   - App de comprobantes: /comprobantes-electronicos-internet/pages/*.jsf,
+#     autenticada vía /tuportal-internet/GeneraToken.jsp?urlAplicacion=...
+#   - Captcha: reCAPTCHA Enterprise; la clave pública se obtiene de
+#     /sri-captcha-servicio-internet/rest/ValidacionCaptcha/obtenerClavePublicaGoogleRecaptcha
+
+login:
+  # Campo del RUC en el formulario de Keycloak.
+  usuario:
+    - "#usuario"
+    - "input[name='usuario']"
+    - "#username"
+  # Campo de la clave.
+  clave:
+    - "#password"
+    - "input[name='password']"
+  # Solo para RUC de 13 dígitos.
+  clave_adicional:
+    - "#ciAdicional"
+    - "input[name='ciAdicional']"
+  boton:
+    - "#kc-login"
+    - "input[name='login']"
+    - "button[type='submit']"
+  # Mensajes de credenciales inválidas.
+  error:
+    - ".alert-danger"
+    - ".kc-error-message"
+    - "#input-error-username"
+    - "#input-error-password"
+
+acuerdo:
+  # Aviso de protección de datos que aparece en el primer ingreso.
+  aceptar:
+    - "button:has-text('Aceptar')"
+    - "a:has-text('Acepto')"
+    - "#aceptarAcuerdo"
+    - "input[value='Aceptar']"
+
+menu:
+  # Menú lateral: "Facturación Electrónica" → "Comprobantes electrónicos recibidos".
+  facturacion_electronica:
+    - "a:has-text('Facturación Electrónica')"
+    - "li:has-text('Facturación Electrónica') a"
+    - "span:has-text('Facturación Electrónica')"
+  comprobantes_recibidos:
+    - "a:has-text('Comprobantes electrónicos recibidos')"
+    - "a:has-text('Comprobantes electronicos recibidos')"
+    - "a:has-text('Comprobantes recibidos')"
+
+consulta:
+  # URL directa de la pantalla de comprobantes recibidos. Si se deja vacía, el
+  # robot navega por el menú lateral. Rellénela en cuanto conozca la URL
+  # exacta: es más rápida y estable que el menú.
+  url_directa: ""
+
+  # Filtros de la pantalla "Comprobantes electrónicos recibidos".
+  anio:
+    - "#anio"
+    - "select[name='anio']"
+    - "select[id*='anio' i]"
+    - "select[id*='Anio' i]"
+  mes:
+    - "#mes"
+    - "select[name='mes']"
+    - "select[id*='mes' i]"
+  dia:
+    - "#dia"
+    - "select[name='dia']"
+    - "select[id*='dia' i]"
+  tipo_comprobante:
+    - "#tipoComprobante"
+    - "select[name='tipoComprobante']"
+    - "select[id*='tipoComprobante' i]"
+
+  # Botón que dispara la consulta (verificación con reCAPTCHA).
+  consultar:
+    - "button:has-text('Consultar')"
+    - "#btnConsultar"
+    - "input[value='Consultar']"
+    - "a:has-text('Consultar')"
+
+  # Enlace que descarga el reporte TXT.
+  descargar:
+    - "a:has-text('Descargar reporte')"
+    - "button:has-text('Descargar reporte')"
+    - "#descargarReporte"
+    - "a:has-text('Descargar Reporte')"
+
+  # Tabla con los comprobantes recibidos.
+  tabla_resultados:
+    - "#tblComprobantes"
+    - "table[id*='omprobante' i]"
+    - ".dataTable"
+    - "table"
+
+  # Mensaje que aparece cuando la consulta no devuelve comprobantes.
+  mensaje_sin_datos:
+    - ":has-text('No se encontraron comprobantes')"
+    - ":has-text('No existen comprobantes')"
+    - ":has-text('No se obtuvo resultados')"
+    - ":has-text('No hay resultados')"

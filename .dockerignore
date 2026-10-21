@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.mypy_cache
+.pytest_cache
+.ruff_cache
+tests
+datos
+diagnostico
+config/robots.yaml
+.env

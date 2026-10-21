@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Configuración con secretos
+config/robots.yaml
+.env
+secrets.json
+
+# Datos descargados del SRI
+datos/
+diagnostico/
+*.txt
+!config/**/*.txt
+
+# Sistema
+.DS_Store
+.idea/
+.vscode/
