@@ -8,6 +8,10 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 
 ### Añadido
 
+- **Configuración por línea de comandos**: `--ruc`, `--password`, `--api-key`,
+  `--perfil`, `--salida` y `--visible` sustituyen al YAML. Sin `--config` el
+  robot funciona con valores por defecto (`./datos`, todos los tipos) y la
+  clave se pregunta de forma oculta si no se pasa `--password`.
 - **Perfil de Chrome dedicado y calentado** (`portal.perfil_dir`): el portal
   solo acepta el reCAPTCHA de un perfil que ya recibió una consulta hecha por
   una persona. El robot lanza Chrome sin las banderas de automatización de
@@ -25,6 +29,11 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 
 ### Corregido
 
+- El login tolera que Playwright no reciba el evento de navegación tras pulsar
+  "Ingresar" (habitual al conectar por CDP): el resultado se decide por la URL,
+  no por la espera del clic.
+- La guía de instalación usaba `python3.12`, que no existe en todas las macOS;
+  ahora indica cualquier intérprete ≥ 3.12 y el uso real sin editar el YAML.
 - El portal no responde a Chromium cuando se identifica como headless ni cuando
   negocia HTTP/2: se fija un User-Agent de Chrome de escritorio y
   `--disable-http2`. Sin esto todas las ejecuciones acababan en

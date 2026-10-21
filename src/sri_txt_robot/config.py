@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -156,30 +157,37 @@ class ConfigError(RuntimeError):
 def cargar_config(path: str | Path) -> RobotConfig:
     """Carga la configuración desde un archivo YAML.
 
-    Acepta variables de entorno en la forma ``${NOMBRE}`` dentro del YAML para
-    no escribir secretos en disco.
+    Acepta variables de entorno en la forma ``${NOMBRE}`` dentro de los
+    **valores** del YAML para no escribir secretos en disco. Los comentarios no
+    se expanden.
     """
     ruta = Path(path)
     if not ruta.is_file():
         raise ConfigError(f"No existe el archivo de configuración: {ruta}")
 
     contenido = ruta.read_text(encoding="utf-8")
-    datos = _expandir_variables(contenido)
-    return RobotConfig.model_validate(datos)
+    datos = yaml.safe_load(contenido) or {}
+    if not isinstance(datos, dict):
+        raise ConfigError("El archivo de configuración debe contener un mapa YAML.")
+    return RobotConfig.model_validate(_expandir_en_valores(datos))
 
 
-def _expandir_variables(contenido: str) -> dict[str, Any]:
-    """Sustituye ``${NOMBRE}`` por variables de entorno antes de validar."""
-    import re
+def _expandir_en_valores(datos: Any) -> Any:
+    """Sustituye ``${NOMBRE}`` en los valores ya parseados del YAML."""
+    if isinstance(datos, str):
+        return _expandir_texto(datos)
+    if isinstance(datos, dict):
+        return {clave: _expandir_en_valores(valor) for clave, valor in datos.items()}
+    if isinstance(datos, list):
+        return [_expandir_en_valores(elemento) for elemento in datos]
+    return datos
 
+
+def _expandir_texto(valor: str) -> str:
     def reemplazar(marco: re.Match[str]) -> str:
         nombre = marco.group(1)
         if nombre not in os.environ:
             raise ConfigError(f"La variable de entorno {nombre} no está definida.")
         return os.environ[nombre]
 
-    texto = re.sub(r"\$\{([A-Z0-9_]+)\}", reemplazar, contenido)
-    datos = yaml.safe_load(texto) or {}
-    if not isinstance(datos, dict):
-        raise ConfigError("El archivo de configuración debe contener un mapa YAML.")
-    return datos
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", reemplazar, valor)

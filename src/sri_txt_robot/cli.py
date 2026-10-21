@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import SecretStr
 
 from .captcha.anticaptcha import AntiCaptchaClient
 from .captcha.inject import detectar_accion, detectar_sitekey, es_enterprise, es_invisible
-from .config import ConfigError, RobotConfig, cargar_config
+from .config import ConfigError, RobotConfig, RobotEntry, cargar_config
 from .logging import configurar_logging, obtener_logger
 from .manifest import extraer_claves
 from .models import Periodo, TipoComprobante
@@ -42,7 +43,11 @@ SELECTORES_POR_DEFECTO = "config/selectors.yaml"
 def descargar(
     config: Annotated[
         Path,
-        typer.Option("--config", "-c", help="Archivo YAML de configuración."),
+        typer.Option(
+            "--config",
+            "-c",
+            help="Archivo YAML de configuración. Opcional si pasa --ruc y --password.",
+        ),
     ] = Path(CONFIG_POR_DEFECTO),
     selectores: Annotated[
         Path,
@@ -61,8 +66,32 @@ def descargar(
     ] = None,
     ruc: Annotated[
         str | None,
-        typer.Option("--ruc", "-r", help="Procesa solo un RUC."),
+        typer.Option("--ruc", "-r", help="RUC (13 dígitos) o cédula (10) del contribuyente."),
     ] = None,
+    password: Annotated[
+        str | None,
+        typer.Option(
+            "--password",
+            "-w",
+            help="Clave del portal. Si se omite junto a --ruc, se pregunta de forma oculta.",
+        ),
+    ] = None,
+    api_key: Annotated[
+        str | None,
+        typer.Option("--api-key", help="Clave de anti-captcha. Opcional: el navegador suele bastar."),
+    ] = None,
+    perfil: Annotated[
+        str | None,
+        typer.Option("--perfil", help="Carpeta del perfil de Chrome calentado (ver 'calentar')."),
+    ] = None,
+    salida: Annotated[
+        str | None,
+        typer.Option("--salida", help="Carpeta donde guardar los TXT (por defecto ./datos)."),
+    ] = None,
+    visible: Annotated[
+        bool,
+        typer.Option("--visible", help="Muestra la ventana de Chrome (necesario para el captcha)."),
+    ] = False,
     tipos: Annotated[
         list[str] | None,
         typer.Option("--tipo", "-t", help="Tipo de comprobante a descargar. Repetible."),
@@ -76,7 +105,15 @@ def descargar(
     """Descarga los TXT de comprobantes recibidos."""
     configurar_logging(log_nivel)
 
-    configuracion = _cargar(config)
+    configuracion = _construir_configuracion(
+        config,
+        ruc=ruc,
+        password=_pedir_password(ruc, password),
+        api_key=api_key,
+        perfil=perfil,
+        salida=salida,
+        visible=visible,
+    )
     catalogo = _cargar_selectores(selectores)
 
     periodos_objetivo = _resolver_periodos(periodos)
@@ -136,7 +173,19 @@ def calentar(
     ] = Path(SELECTORES_POR_DEFECTO),
     ruc: Annotated[
         str | None,
-        typer.Option("--ruc", "-r", help="RUC a usar para el calentamiento."),
+        typer.Option("--ruc", "-r", help="RUC (13 dígitos) o cédula (10) del contribuyente."),
+    ] = None,
+    password: Annotated[
+        str | None,
+        typer.Option("--password", "-w", help="Clave del portal. Si se omite, se pregunta de forma oculta."),
+    ] = None,
+    api_key: Annotated[
+        str | None,
+        typer.Option("--api-key", help="Clave de anti-captcha. Opcional."),
+    ] = None,
+    perfil: Annotated[
+        str | None,
+        typer.Option("--perfil", help="Carpeta del perfil de Chrome dedicado."),
     ] = None,
     espera: Annotated[
         int,
@@ -152,12 +201,21 @@ def calentar(
     cierre la ventana cuando el comando termine.
     """
     configurar_logging()
-    configuracion = _cargar(config)
+    configuracion = _construir_configuracion(
+        config,
+        ruc=ruc,
+        password=_pedir_password(ruc, password),
+        api_key=api_key,
+        perfil=perfil,
+        salida=None,
+        visible=True,
+    )
     catalogo = _cargar_selectores(selectores)
 
     if not configuracion.portal.perfil_dir.strip():
         typer.secho(
-            "Defina 'portal.perfil_dir' en la configuración: es el perfil de Chrome que se calienta aquí.",
+            "Indique el perfil con --perfil (por ejemplo ~/.sri-txt-robot/perfil) "
+            "o defina 'portal.perfil_dir' en la configuración.",
             fg=typer.colors.RED,
             err=True,
         )
@@ -360,6 +418,88 @@ def _cargar(ruta: Path) -> RobotConfig:
     except (ConfigError, FileNotFoundError) as error:
         typer.secho(f"Error de configuración: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from error
+
+
+def _pedir_password(ruc: str | None, password: str | None) -> str | None:
+    """Devuelve la clave del portal; si hace falta, la pregunta sin mostrarla."""
+    if password or not ruc:
+        return password
+    if not sys.stdin.isatty():
+        raise typer.BadParameter("Falta --password y no hay terminal para preguntarla.")
+    respuesta: str = typer.prompt(f"Clave del SRI para {ruc}", hide_input=True)
+    return respuesta
+
+
+def _construir_configuracion(
+    ruta: Path,
+    *,
+    ruc: str | None,
+    password: str | None,
+    api_key: str | None,
+    perfil: str | None,
+    salida: str | None,
+    visible: bool,
+) -> RobotConfig:
+    """Combina el YAML (si existe) con lo que venga en la línea de comandos.
+
+    Con ``--ruc`` y ``--password`` no hace falta ningún archivo: el robot se
+    configura por completo desde el comando.
+    """
+    try:
+        return _configuracion_para(
+            ruta,
+            ruc=ruc,
+            password=password,
+            api_key=api_key,
+            perfil=perfil,
+            salida=salida,
+            visible=visible,
+        )
+    except ConfigError as error:
+        typer.secho(f"Error de configuración: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from error
+
+
+def _configuracion_para(
+    ruta: Path,
+    *,
+    ruc: str | None,
+    password: str | None,
+    api_key: str | None,
+    perfil: str | None,
+    salida: str | None,
+    visible: bool,
+) -> RobotConfig:
+    base = _cargar(ruta) if ruta.is_file() else RobotConfig()
+
+    portal = base.portal
+    if perfil:
+        portal = portal.model_copy(update={"perfil_dir": perfil})
+    if visible:
+        portal = portal.model_copy(update={"headless": False})
+
+    captcha = base.captcha
+    if api_key:
+        captcha = captcha.model_copy(update={"api_key": SecretStr(api_key)})
+
+    storage = base.storage
+    if salida:
+        storage = storage.model_copy(update={"local_dir": salida})
+    elif not storage.bucket and not storage.local_dir:
+        storage = storage.model_copy(update={"local_dir": "./datos"})
+
+    robots = base.robots
+    if password:
+        if not ruc:
+            raise ConfigError("Indique --ruc junto con --password.")
+        robots = (RobotEntry(ruc=ruc, password=SecretStr(password), activo=True),)
+    elif ruc and not any(entrada.ruc == ruc for entrada in robots):
+        raise ConfigError(f"El RUC {ruc} no está en {ruta}: agregue --password para usarlo sin editar el YAML.")
+
+    if not robots:
+        raise ConfigError("No hay contribuyentes: indique --ruc y --password (o use --config).")
+
+    return base.model_copy(update={"portal": portal, "captcha": captcha, "storage": storage, "robots": robots})
 
 
 def _cargar_selectores(ruta: Path) -> Selectores:

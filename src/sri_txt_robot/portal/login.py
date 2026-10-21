@@ -90,7 +90,13 @@ def iniciar_sesion(
     if boton is None:
         raise LoginError("No se encontró el botón de ingreso del formulario de acceso.")
 
-    boton.click()
+    try:
+        boton.click()
+    except PlaywrightTimeoutError:
+        # Con un Chrome conectado por CDP, Playwright a veces no recibe el
+        # evento de navegación aunque el formulario sí se haya enviado. La
+        # comprobación real la hace `_esperar_sesion`.
+        logger.debug("el clic de acceso no confirmó la navegación; se comprueba la URL")
 
     _esperar_sesion(page, selectores)
 

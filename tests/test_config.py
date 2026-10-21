@@ -171,3 +171,57 @@ robots: []
 
     with pytest.raises(ConfigError, match="ANTICAPTCHA_API_KEY"):
         configuracion.captcha.resolver_api_key()
+
+
+def test_los_comentarios_no_expanden_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """La plantilla menciona ${NOMBRE} en un comentario: copiarla debe funcionar."""
+    monkeypatch.delenv("NOMBRE", raising=False)
+    ruta = _escribir(
+        tmp_path,
+        """
+version: 1
+# Los secretos se pasan como ${NOMBRE} o por variables de entorno.
+storage:
+  local_dir: "./datos"
+robots: []
+""",
+    )
+
+    configuracion = cargar_config(ruta)
+
+    assert configuracion.storage.local_dir == "./datos"
+
+
+def test_expande_variables_en_los_valores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MI_CLAVE_SRI", "secreto")
+    ruta = _escribir(
+        tmp_path,
+        """
+version: 1
+storage:
+  local_dir: "./datos"
+robots:
+  - ruc: "1790012345001"
+    password: "${MI_CLAVE_SRI}"
+""",
+    )
+
+    configuracion = cargar_config(ruta)
+
+    assert configuracion.robots[0].a_config_ruc().credenciales.password == "secreto"
+
+
+def test_falla_si_la_variable_del_valor_no_existe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NO_DEFINIDA", raising=False)
+    ruta = _escribir(
+        tmp_path,
+        """
+version: 1
+storage:
+  local_dir: "${NO_DEFINIDA}"
+robots: []
+""",
+    )
+
+    with pytest.raises(ConfigError, match="NO_DEFINIDA"):
+        cargar_config(ruta)

@@ -127,40 +127,41 @@ manifiesto JSON de claves).
 
 ### 1. Requisitos
 
-- Python 3.12 o superior.
-- [Playwright](https://playwright.dev/python/) con Chromium.
-- Una cuenta de [anti-captcha](https://anti-captcha.com/) con saldo.
+- Python 3.12 o superior. Compruebe con `python3 --version`; si es anterior,
+  use el binario nuevo (`python3.13`, `python3.12`, …).
+- Google Chrome instalado (solo para el perfil dedicado; el modo clásico usa
+  el Chromium de Playwright).
+- anti-captcha es **opcional**: hoy el portal rechaza sus tokens, así que el
+  robot funciona sin cuenta.
 
 ```bash
 cd sri-txt-robot
-python3.12 -m venv .venv
+python3 -m venv .venv          # use un Python >= 3.12
 source .venv/bin/activate
 pip install -e ".[dev]"
+```
+
+Si va a usar el modo clásico (sin perfil dedicado), instale además el
+navegador de Playwright:
+
+```bash
 playwright install chromium
 ```
 
-### 2. Configuración
+### 2. Configuración (opcional)
+
+No hace falta editar ningún archivo: RUC, clave, perfil y carpeta de salida se
+pasan en el mismo comando. Copie la plantilla solo si prefiere un YAML (varios
+RUC, S3, etc.):
 
 ```bash
 cp config/robots.example.yaml config/robots.yaml
 ```
 
-Edite `config/robots.yaml`:
-
-- `captcha.api_key_env`: variable de entorno con la clave de anti-captcha
-  (por defecto `ANTICAPTCHA_API_KEY`).
-- `storage.local_dir`: dónde guardar los TXT en local (`.` bucket si prefiere
-  S3).
-- `robots[]`: un RUC por contribuyente, con `password_env` apuntando a la
-  variable que contiene su clave del portal.
-
-```bash
-export ANTICAPTCHA_API_KEY="..."
-export SRI_PASSWORD_1790012345001="..."
-```
-
-Los secretos **nunca** se escriben en el YAML versionado: use `password_env` o
-la forma `${VARIABLE}`.
+En ese caso, `captcha.api_key` es la **clave** de anti-captcha y
+`captcha.api_key_env` es el **nombre de la variable de entorno** que la
+contiene; no mezcle ambos. `robots[].password_env` también espera un nombre de
+variable, no la clave.
 
 ### 3. Calentar el perfil de Chrome
 
@@ -173,8 +174,12 @@ El flujo tiene dos pasos y solo el primero necesita intervención:
 
 ```bash
 # 1) Una sola vez: abre Chrome con el perfil dedicado y espera tu consulta
-sri-txt-robot calentar --config config/robots.yaml
+sri-txt-robot calentar --ruc 1758871873001 --perfil ~/.sri-txt-robot/perfil
 ```
+
+Si omite `--password`, el comando pide la clave de forma oculta. También puede
+pasarla en el mismo comando (`--password '...'`), aunque quedará en el
+historial del shell.
 
 En la ventana que se abre: elija un mes cerrado, deje el día en **Todos**,
 pulse **Consultar** a mano y espere los resultados. El comando termina solo y
@@ -182,8 +187,16 @@ deja el perfil habilitado.
 
 ```bash
 # 2) A partir de aquí, todo automático
-sri-txt-robot descargar -p 2026-07 -p 2026-08 -p 2026-09
+sri-txt-robot descargar \
+  --ruc 1758871873001 \
+  --perfil ~/.sri-txt-robot/perfil \
+  --visible \
+  -p 2026-07 -p 2026-08 -p 2026-09 \
+  -t 01
 ```
+
+`--salida ./datos` cambia la carpeta de los TXT y `--api-key` define la clave
+de anti-captcha si algún día hace falta.
 
 Detalles que importan:
 
@@ -223,7 +236,14 @@ URL limpia del JSF.
 ### 5. Ejecutar
 
 ```bash
-# Período sugerido (mes anterior), todos los RUC y todos los tipos
+# Sin archivo de configuración: todo por línea de comandos
+sri-txt-robot descargar \
+  --ruc 1758871873001 \
+  --perfil ~/.sri-txt-robot/perfil \
+  --visible \
+  -p 2026-07 -p 2026-08 -p 2026-09 -t 01
+
+# Con YAML (varios RUC, S3, tipos por defecto)
 sri-txt-robot descargar --config config/robots.yaml
 
 # Un RUC, un tipo y un período concretos
