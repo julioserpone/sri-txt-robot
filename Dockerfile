@@ -7,7 +7,7 @@
 #
 # La imagen oficial de Playwright está basada en Ubuntu Noble (glibc 2.39) y
 # no es compatible con el runtime de Lambda.
-FROM public.ecr.aws/lambda/python:3.12
+FROM public.ecr.aws/lambda/python:3.14
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
     PIP_NO_CACHE_DIR=1 \
