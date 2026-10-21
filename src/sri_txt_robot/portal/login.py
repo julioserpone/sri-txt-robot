@@ -105,16 +105,21 @@ def iniciar_sesion(
 
 def _esperar_sesion(page: Page, selectores: Selectores) -> None:
     """Espera a que el portal acepte las credenciales."""
-    try:
-        page.wait_for_url(
-            lambda url: _pagina_del_portal(url),
-            timeout=90_000,
-            wait_until="domcontentloaded",
-        )
-    except PlaywrightTimeoutError:
-        if _mostrar_error(page, selectores):
-            raise LoginError("El SRI rechazó las credenciales. Verifique RUC y clave.") from None
-        raise LoginError(f"El login no avanzó fuera de Keycloak. URL actual: {page.url}") from None
+    # Con un perfil ya calentado el portal puede completar la navegación antes
+    # de llegar aquí. En ese caso no queda ningún evento de navegación que
+    # ``wait_for_url`` pueda observar y la espera agotaría su tiempo aunque la
+    # sesión ya esté establecida.
+    if not _sesion_reutilizable(page):
+        try:
+            page.wait_for_url(
+                lambda url: _pagina_del_portal(url),
+                timeout=90_000,
+                wait_until="domcontentloaded",
+            )
+        except PlaywrightTimeoutError:
+            if _mostrar_error(page, selectores):
+                raise LoginError("El SRI rechazó las credenciales. Verifique RUC y clave.") from None
+            raise LoginError(f"El login no avanzó fuera de Keycloak. URL actual: {page.url}") from None
 
     if _mostrar_error(page, selectores):
         raise LoginError("El SRI rechazó las credenciales. Verifique RUC y clave.")

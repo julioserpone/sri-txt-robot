@@ -17,7 +17,9 @@ propia función de Lambda.
 from __future__ import annotations
 
 import os
+import shutil
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 from .config import RobotConfig, cargar_config
@@ -36,6 +38,7 @@ SELECTORES_POR_DEFECTO = "/opt/config/selectors.yaml"
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     """Ejecuta el robot para el período indicado en el evento."""
     configuracion = _cargar_configuracion()
+    _preparar_perfil(configuracion)
     selectores = Selectores.cargar(os.environ.get("SRI_ROBOT_SELECTORS", SELECTORES_POR_DEFECTO))
     almacenamiento = crear_almacenamiento(configuracion)
 
@@ -68,6 +71,34 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         },
     )
     return respuesta
+
+
+def _preparar_perfil(configuracion: RobotConfig) -> None:
+    """Copia el perfil horneado en la imagen a una ruta escribible.
+
+    En Lambda ``/opt`` es de solo lectura y Chrome necesita escribir en el
+    perfil. La copia se hace al empezar la ejecución, no al arrancar el
+    contenedor: la fase de inicialización tiene un límite de 10 s y el perfil
+    ronda los 40 MB. Se copia a un directorio temporal y se renombra para no
+    dejar un perfil a medias si la ejecución se interrumpe.
+    """
+    origen_texto = os.environ.get("SRI_PERFIL_ORIGEN", "").strip()
+    if not origen_texto:
+        return
+    origen = Path(origen_texto).expanduser()
+    if not origen.is_dir():
+        return
+
+    destino = Path(configuracion.portal.perfil_dir).expanduser()
+    if destino.exists():
+        return
+
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    temporal = destino.with_name(f"{destino.name}-tmp")
+    shutil.rmtree(temporal, ignore_errors=True)
+    shutil.copytree(origen, temporal, symlinks=True)
+    temporal.rename(destino)
+    logger.info("perfil de Chrome copiado a una ruta escribible", extra={"perfil": str(destino)})
 
 
 def _cargar_configuracion() -> RobotConfig:

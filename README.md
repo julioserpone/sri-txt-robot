@@ -348,14 +348,12 @@ $clave = "produccion/{$ruc}/{$periodo}/facturas-recibidas-{$periodo}-claves.json
 
 ## Despliegue en AWS
 
-> **Estado (oct-2026): el empaquetado está validado, el captcha no.**
-> La imagen se construye y el robot se ejecuta dentro del contenedor Linux
-> (Xvfb + Chrome "con ventana"), pero el portal **rechaza el reCAPTCHA** con el
-> perfil calentado en macOS: la confianza parece atada al navegador/sistema
-> donde se calentó. También se probó anti-captcha y el portal rechazó sus
-> tokens. Por eso, hoy, **no se recomienda publicarlo en Lambda**: use el cron
-> local (ver más abajo) o vuelva a calentar el perfil en el sistema de destino
-> y verifique antes.
+> **Estado (oct-2026): validado de extremo a extremo en Lambda.**
+> El captcha lo resuelve el propio navegador, sin anti-captcha: 44 claves en
+> 2026-09 y 24 en 2026-08, en ejecuciones de 45-60 s. La clave está en calentar
+> el perfil **dentro del contenedor Linux** (el perfil calentado en macOS no
+> transfiere la confianza) y en lanzar Chrome con `--no-zygote`, porque el
+> sandbox de Lambda no permite el `fork` del zygote.
 
 El robot corre en **Lambda con imagen de contenedor**, guarda los TXT en S3 y se
 dispara con una regla mensual de EventBridge. No usa Secrets Manager: la clave
@@ -376,17 +374,58 @@ El script pide la clave de forma oculta (o `--password '...'`) y es
 2. Si la función ya existe, muestra su estado y **no cambia nada**; para
    desplegar una versión nueva hay que añadir `--actualizar`.
 3. Si no existe, crea lo mínimo: bucket S3 (privado, cifrado), repositorio ECR,
-   rol IAM, función Lambda (`arm64`, 2 GB, 900 s) y regla de EventBridge.
+   rol IAM, función Lambda (`arm64`, 3008 MB, 900 s) y regla de EventBridge.
 
 Lo que se publica:
 
 - `deploy/build/perfil`: copia del perfil de Chrome calentado (se quitan los
-  `Singleton*` de macOS, que en Linux hacen que Chrome crea que el perfil está
-  en uso).
+  `Singleton*`, que en Linux hacen que Chrome crea que el perfil está en uso).
 - `deploy/build/config/robots.yaml`: RUC y `password_env: SRI_PASSWORD`.
 - Variables de la función: `SRI_PASSWORD`, `SRI_AMBIENTE`, `SRI_BUCKET`.
 
-Frecuencia por defecto: día 5 de cada mes a las 08:00 UTC (03:00 de Ecuador),
+### Calentar el perfil dentro de Linux
+
+El perfil calentado en macOS **no** sirve en Linux: el portal rechaza el
+reCAPTCHA porque la confianza está atada al navegador donde se resolvió. Hay que
+calentarlo una vez dentro del mismo contenedor que se usa en Lambda:
+
+```bash
+# Imagen con VNC sobre la imagen de Playwright
+docker build -f deploy/Dockerfile.calentar -t sri-txt-robot:calentar .
+
+# Página de consulta lista y esperando el clic manual
+docker run --rm -p 127.0.0.1:5900:5900 \
+  -v "$PWD/deploy/build/perfil:/perfil" \
+  --entrypoint bash sri-txt-robot:calentar -lc '
+    Xvfb :99 -screen 0 1440x900x24 >/tmp/xvfb.log 2>&1 &
+    x11vnc -display :99 -forever -shared -passwd srirobot-2026 >/tmp/x11vnc.log 2>&1 &
+    export DISPLAY=:99; sleep 2
+    exec python -m sri_txt_robot calentar \
+      --perfil /perfil --ruc "$RUC" --password "$SRI_PASSWORD" --espera 5400'
+```
+
+Desde el Finder: `Cmd+K` → `vnc://127.0.0.1:5900`, contraseña `srirobot-2026`.
+Elija un mes cerrado, día **Todos**, pulse **Consultar** y espere la tabla. El
+comando termina solo y deja el perfil en `deploy/build/perfil`; después:
+
+```bash
+./scripts/publicar.sh --perfil deploy/build/perfil --ruc 1758871873001 \
+  --ambiente produccion --tipos 01,03,04,05,07 --actualizar
+```
+
+Solo hay que repetirlo si el portal vuelve a rechazar el captcha (por ejemplo,
+tras muchos meses o un cambio de infraestructura). Guarde el perfil fuera del
+repositorio (por ejemplo `~/.sri-txt-robot/perfil-linux`) y pase esa ruta a
+`--perfil`; contiene cookies de sesión y no debe versionarse.
+
+Dos detalles del entorno Lambda que el despliegue ya resuelve:
+
+- `/opt` es de solo lectura: el handler copia el perfil a `/tmp/perfil` al
+  empezar (no en el arranque, que tiene un límite de 10 s).
+- Chrome se lanza con `--no-zygote` (`SRI_CHROME_BANDERAS` en la imagen): sin
+  esa bandera el sandbox de Lambda aborta con `Zygote could not fork`.
+
+Frecuencia por defecto: día 5 de cada mes a las 13:00 UTC (08:00 de Ecuador),
 descargando el mes anterior. Se cambia con `--cron`.
 
 ### Invocación manual
@@ -402,15 +441,15 @@ usa el mes cerrado anterior.
 
 ### Coste
 
-Una ejecución mensual de 2-3 minutos con 2 GB de memoria cuesta menos de un
-centavo; el repositorio ECR (~1,5 GB) ronda los 0,15 USD al mes y S3 unos
-céntimos. En total, por debajo de 0,30 USD al mes para un contribuyente.
+Una ejecución mensual de ~1 minuto con 3 GB de memoria cuesta menos de un
+céntimo; el repositorio ECR (imagen de ~2 GB) ronda los 0,20 USD al mes y S3
+unos céntimos. En total, por debajo de 0,30 USD al mes para un contribuyente.
 
-### Alternativa probada: tarea programada en el Mac
+### Alternativa: tarea programada en el Mac
 
-Mientras el captcha no se pueda resolver fuera del Mac, la forma de automatizar
-sin coste es un **LaunchAgent** (corre en la sesión gráfica del usuario, que es
-lo que Chrome necesita) que ejecute el robot y suba los TXT a S3:
+Si prefiere no depender de AWS, un **LaunchAgent** (corre en la sesión gráfica
+del usuario, que es lo que Chrome necesita) puede ejecutar el robot y subir los
+TXT a S3:
 
 ```xml
 <!-- ~/Library/LaunchAgents/com.ejemplo.sri-txt-robot.plist -->

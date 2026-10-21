@@ -34,7 +34,10 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   y regla mensual de EventBridge. Es idempotente: si la función ya existe no
   toca nada salvo `--actualizar`.
 - `deploy/Dockerfile` (Playwright + `awslambdaric`) y
-  `deploy/Dockerfile.lambda` (configuración y perfil calentado).
+  `deploy/Dockerfile.lambda` (configuración, perfil calentado y banderas de
+  Chrome para Lambda).
+- `deploy/Dockerfile.calentar`: añade `x11vnc` a la imagen para calentar el
+  perfil dentro de Linux una sola vez, por VNC.
 - La opción `--selectors` respeta `SRI_ROBOT_SELECTORS`, para que la imagen de
   Lambda encuentre los selectores en `/opt/config`.
 - Descarga de **varios períodos en una sola ejecución**: `-p` es repetible
@@ -45,14 +48,21 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 - El robot intenta primero el captcha con el propio navegador y solo recurre a
   anti-captcha si el portal lo rechaza.
 
-### No validado en esta versión
+### Validado en AWS (oct-2026)
 
-- **Lambda**: la imagen se construye y el robot corre dentro del contenedor
-  (Xvfb + Chrome con ventana), pero el portal rechaza el captcha con el perfil
-  calentado en macOS; anti-captcha tampoco obtiene tokens válidos. El script
-  `scripts/publicar.sh` queda listo y probado en seco, pero no se recomienda
-  publicar hasta resolver el captcha. La alternativa documentada es un
-  LaunchAgent en el Mac que suba los TXT a S3.
+- **Lambda de extremo a extremo**: el captcha lo resuelve el navegador, sin
+  anti-captcha (44 claves en 2026-09 y 24 en 2026-08, ejecuciones de 45-60 s
+  con 3 GB). Funciona con la sesión de Keycloak caducada: el login se hace solo
+  y la confianza del reCAPTCHA sigue vigente.
+- El perfil debe calentarse **dentro del contenedor Linux**
+  (`deploy/Dockerfile.calentar` + VNC): el calentado en macOS no transfiere la
+  confianza.
+- Chrome se lanza con `--no-zygote` (`SRI_CHROME_BANDERAS` en la imagen): el
+  sandbox de Lambda no permite el `fork` del zygote y el navegador abortaba con
+  `Zygote could not fork` / `GPU process isn't usable`.
+- El handler copia el perfil de `/opt/perfil` a `/tmp/perfil`: en Lambda `/opt`
+  es de solo lectura y la fase de inicialización tiene un límite de 10 s, así
+  que la copia (40 MB) no puede hacerse en el arranque.
 
 ### Corregido
 
@@ -65,7 +75,15 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   existía; ahora se leen las opciones una vez y se selecciona la que coincide.
 - El perfil de macOS lleva enlaces `SingletonLock/Socket/Cookie` que en Linux
   hacen que Chrome crea que el perfil está en uso y termine con código 21; la
-  imagen los elimina al copiarlo.
+  imagen los elimina al copiarlo y el robot los retira antes de cada arranque,
+  también cuando reutiliza el perfil en `/tmp` dentro de Lambda.
+- En un perfil ya calentado el portal podía completar la navegación antes de que
+  `_esperar_sesion` empezara a observarla; la espera agotaba los 90 s aunque la
+  sesión ya estuviera establecida. Ahora se comprueba primero la URL actual.
+- Xvfb se arranca antes que el runtime y se espera a su socket: sin eso Chrome
+  fallaba en Lambda con `Missing X server or $DISPLAY`.
+- Xvfb puede desaparecer cuando Lambda reutiliza el microVM; el robot lo detecta
+  y lo relanza antes de abrir Chrome (`SRI_ASEGURAR_XVFB`) en lugar de fallar.
 - En Linux el perfil dedicado se atascaba en HTTP/2 al entrar al portal: se
   lanza con `--disable-http2`, igual que el modo clásico.
 - El login tolera que Playwright no reciba el evento de navegación tras pulsar
