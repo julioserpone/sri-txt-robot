@@ -7,9 +7,19 @@ FROM sri-txt-robot:base
 
 COPY deploy/build/config/ /opt/config/
 COPY deploy/build/perfil /opt/perfil
+# El perfil se copió desde macOS y conserva modos 700; el runtime de Lambda no
+# siempre corre como su propietario y no podría leerlo.
+RUN chmod -R a+rX /opt/perfil
 COPY deploy/iniciar.sh /opt/iniciar.sh
 
 ENV DISPLAY=:99
+ENV SRI_PERFIL_ORIGEN=/opt/perfil
+# Xvfb puede desaparecer cuando Lambda reutiliza el sandbox; se relanza antes
+# de abrir Chrome si hace falta.
+ENV SRI_ASEGURAR_XVFB=1
+# Lambda no permite que Chrome cree procesos hijos (zygote): sin esta bandera
+# el navegador aborta con "Zygote could not fork" / "GPU process isn't usable".
+ENV SRI_CHROME_BANDERAS=--no-zygote
 
 ENTRYPOINT ["/bin/sh", "/opt/iniciar.sh"]
 CMD ["sri_txt_robot.handler.handler"]

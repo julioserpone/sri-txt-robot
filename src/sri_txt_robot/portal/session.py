@@ -7,6 +7,7 @@ privilegios de sandbox.
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
@@ -29,7 +30,12 @@ logger = obtener_logger(__name__)
 CHROME_MACOS = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 #: Tiempo máximo de espera a que el Chrome recién lanzado abra el puerto CDP.
-ESPERA_CDP_SEGUNDOS = 40.0
+#: En Lambda el arranque en frío es más lento que en un portátil: con 40 s el
+#: navegador llegaba a arrancar pero el puerto aún no estaba listo.
+ESPERA_CDP_SEGUNDOS = 90.0
+
+#: Enlaces que Chrome deja en el perfil al cerrarse y que impiden reutilizarlo.
+BLOQUEOS_DEL_PERFIL = ("SingletonLock", "SingletonCookie", "SingletonSocket")
 
 #: User-Agent de escritorio Linux. Chrome en modo headless se anuncia como
 #: "HeadlessChrome" y el portal del SRI deja de responder; en el contenedor se
@@ -128,6 +134,9 @@ class Navegador:
         assert self._playwright is not None
         perfil = Path(self._configuracion.perfil_dir).expanduser()
         perfil.mkdir(parents=True, exist_ok=True)
+        if os.environ.get("SRI_ASEGURAR_XVFB", "").strip().lower() in {"1", "true", "si", "sí"}:
+            _asegurar_pantalla()
+        _limpiar_bloqueos(perfil)
 
         ejecutable = self._configuracion.chrome_path.strip()
         if not ejecutable:
@@ -150,12 +159,21 @@ class Navegador:
             "about:blank",
         ]
         if sys.platform != "darwin":
-            orden[1:1] = [
+            banderas_linux = [
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-http2",
                 "--disable-gpu",
             ]
+            # Lambda bloquea la creación de procesos hijos de Chrome: el zygote
+            # no puede hacer fork y el navegador aborta al arrancar ("GPU
+            # process isn't usable. Goodbye"). En un solo proceso no hay zygote
+            # ni proceso de GPU que lanzar. Se activa solo en ese entorno.
+            if os.environ.get("SRI_CHROME_SINGLE_PROCESS", "").strip().lower() in {"1", "true", "si", "sí"}:
+                banderas_linux.append("--single-process")
+            # Bandera(s) adicionales para diagnosticar entornos restringidos.
+            banderas_linux.extend(os.environ.get("SRI_CHROME_BANDERAS", "").split())
+            orden[1:1] = banderas_linux
         if self._configuracion.headless and sys.platform != "darwin":
             orden.insert(-1, "--headless=new")
             orden.insert(-1, f"--user-agent={self._configuracion.user_agent or USER_AGENT_LINUX}")
@@ -171,7 +189,12 @@ class Navegador:
             logger.error("Chrome no arrancó; vea %s", self._log_chrome.name)
             raise
 
-        self._browser = self._playwright.chromium.connect_over_cdp(url_cdp)
+        self._browser = _conectar_cdp(
+            self._playwright,
+            url_cdp,
+            self._proceso,
+            Path(self._log_chrome.name),
+        )
         contextos = self._browser.contexts
         if not contextos:
             raise RuntimeError("Chrome no expuso ningún contexto de navegador.")
@@ -236,6 +259,68 @@ class Navegador:
         return self._modo_perfil
 
 
+def _pantalla_viva(pantalla: str) -> bool:
+    """Indica si hay un proceso Xvfb sirviendo la pantalla indicada."""
+    raiz = Path("/proc")
+    if not raiz.is_dir():
+        return False
+    for entrada in raiz.iterdir():
+        if not entrada.name.isdigit():
+            continue
+        try:
+            argumentos = (entrada / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if b"Xvfb" in argumentos and pantalla.encode() in argumentos:
+            return True
+    return False
+
+
+def _asegurar_pantalla() -> None:
+    """Relanza Xvfb si el sandbox lo perdió entre invocaciones.
+
+    Lambda reutiliza el microVM entre ejecuciones y el proceso de Xvfb puede
+    desaparecer. Sin él Chrome aborta con "Missing X server or $DISPLAY".
+    """
+    pantalla = os.environ.get("DISPLAY", ":99").strip() or ":99"
+    if _pantalla_viva(pantalla):
+        return
+
+    logger.info("Xvfb no está activo; se reinicia", extra={"pantalla": pantalla})
+    subprocess.Popen(
+        ["Xvfb", pantalla, "-screen", "0", "1440x900x24"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    socket = Path("/tmp/.X11-unix") / f"X{pantalla.lstrip(':')}"
+    for _ in range(100):
+        if socket.exists():
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"Xvfb no arrancó en {pantalla}")
+
+
+def _limpiar_bloqueos(perfil: Path) -> None:
+    """Elimina los enlaces que Chrome deja al cerrarse de forma abrupta.
+
+    Chrome escribe ``SingletonLock``, ``SingletonCookie`` y ``SingletonSocket``
+    en el perfil y los deja apuntando al equipo donde se ejecutó. En Linux, sin
+    un diálogo de escritorio (zenity, kdialog o xmessage), el navegador no puede
+    avisar de que el perfil está "en uso" y termina con código 21 antes de abrir
+    el puerto CDP. Al reutilizar un perfil —por ejemplo el calentado dentro de
+    un contenedor— hay que retirarlos antes de arrancar.
+    """
+    for nombre in BLOQUEOS_DEL_PERFIL:
+        ruta = perfil / nombre
+        try:
+            if ruta.is_symlink() or ruta.exists():
+                ruta.unlink()
+                logger.debug("bloqueo del perfil eliminado", extra={"ruta": str(ruta)})
+        except OSError:
+            logger.warning("no se pudo eliminar el bloqueo del perfil %s", ruta, exc_info=True)
+
+
 def _puerto_libre() -> int:
     """Devuelve un puerto TCP libre en la interfaz local."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as conexion:
@@ -257,7 +342,46 @@ def _esperar_cdp(puerto: int, proceso: subprocess.Popen[bytes], registro: Path |
             return url
         except Exception:  # noqa: BLE001
             time.sleep(0.25)
-    raise RuntimeError(f"Chrome no expuso el puerto CDP {puerto} en {ESPERA_CDP_SEGUNDOS:.0f} s.")
+    raise RuntimeError(
+        f"Chrome no expuso el puerto CDP {puerto} en {ESPERA_CDP_SEGUNDOS:.0f} s. "
+        f"{_ultimas_lineas(registro)}".strip()
+    )
+
+
+def _conectar_cdp(
+    playwright: Playwright,
+    url: str,
+    proceso: subprocess.Popen[bytes],
+    registro: Path | None,
+    *,
+    intentos: int = 3,
+) -> Browser:
+    """Conecta con el Chrome recién lanzado, tolerando un corte transitorio.
+
+    En Lambda el navegador publica ``/json/version`` antes de terminar de
+    arrancar y la primera conexión puede recibir un ``ECONNRESET``. Se
+    reintenta con una pausa corta antes de dar la ejecución por fallida.
+    """
+    ultimo: Exception | None = None
+    for intento in range(1, intentos + 1):
+        try:
+            return playwright.chromium.connect_over_cdp(url)
+        except Exception as error:  # noqa: BLE001 - se reintenta cualquier fallo de conexión
+            ultimo = error
+            if proceso.poll() is not None:
+                raise RuntimeError(
+                    f"Chrome terminó al conectar por CDP (código {proceso.returncode}). "
+                    f"{_ultimas_lineas(registro)}".strip()
+                ) from error
+            logger.warning(
+                "fallo al conectar con Chrome por CDP; se reintenta",
+                extra={"intento": intento, "error": str(error)},
+            )
+            time.sleep(2)
+
+    raise RuntimeError(
+        f"No se pudo conectar con Chrome por CDP: {ultimo}. {_ultimas_lineas(registro)}".strip()
+    ) from ultimo
 
 
 def _ultimas_lineas(registro: Path | None, limite: int = 500) -> str:

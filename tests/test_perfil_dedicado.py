@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 
 from sri_txt_robot.cli import app
 from sri_txt_robot.config import PortalConfig
-from sri_txt_robot.portal.session import Navegador, _esperar_cdp, _puerto_libre
+from sri_txt_robot.portal.session import Navegador, _esperar_cdp, _limpiar_bloqueos, _puerto_libre
 
 
 def test_portal_por_defecto_no_usa_perfil() -> None:
@@ -51,6 +51,17 @@ def test_esperar_cdp_falla_si_chrome_termino() -> None:
         _esperar_cdp(1, proceso)
 
 
+def test_limpiar_bloqueos_retira_solo_los_enlaces_de_chrome(tmp_path: Path) -> None:
+    for nombre in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        (tmp_path / nombre).symlink_to("/tmp/equipo-anterior")
+    (tmp_path / "Cookies").write_text("datos", encoding="utf-8")
+
+    _limpiar_bloqueos(tmp_path)
+
+    assert not list(tmp_path.glob("Singleton*"))
+    assert (tmp_path / "Cookies").read_text(encoding="utf-8") == "datos"
+
+
 def test_calentar_exige_perfil(tmp_path: Path) -> None:
     configuracion = tmp_path / "robots.yaml"
     configuracion.write_text(
@@ -69,3 +80,9 @@ robots:
 
     assert resultado.exit_code == 2
     assert "perfil_dir" in resultado.output
+
+
+def test_pantalla_viva_es_falsa_para_una_pantalla_inexistente() -> None:
+    from sri_txt_robot.portal.session import _pantalla_viva
+
+    assert _pantalla_viva(":sri-inexistente") is False

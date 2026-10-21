@@ -1,0 +1,11 @@
+# Imagen de apoyo para calentar el perfil dentro de Linux.
+#
+# Añade x11vnc a la imagen del robot para que una persona pueda conectarse por
+# VNC a la pantalla virtual (Xvfb), iniciar sesión en el portal y hacer una
+# consulta manual. Así el perfil queda atado al navegador Linux del contenedor,
+# que es el mismo que se usaría en Lambda o en una instancia EC2.
+FROM sri-txt-robot:prueba
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends x11vnc \
+    && rm -rf /var/lib/apt/lists/*

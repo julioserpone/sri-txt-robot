@@ -24,8 +24,8 @@ PASSWORD=""
 ANTICAPTCHA=""
 TIPOS="01"
 PERFIL="$HOME/.sri-txt-robot/perfil"
-CRON="cron(0 8 5 * ? *)"
-MEMORIA=2048
+CRON="cron(0 13 5 * ? *)"
+MEMORIA=3008
 TIMEOUT=900
 ACTUALIZAR=0
 ROL="sri-txt-robot-lambda"
@@ -37,16 +37,17 @@ Publica el robot del SRI en AWS Lambda.
 Opciones:
   --ruc RUC             RUC (13 dígitos) o cédula (10) del contribuyente.
   --password CLAVE      Clave del portal. Si se omite, se pregunta oculta.
-  --anticaptcha-key K   Clave de anti-captcha (recomendada en Lambda: el
-                        perfil calentado no siempre vale en otro sistema).
+  --anticaptcha-key K   Clave de anti-captcha (opcional: el navegador suele
+                        resolver el captcha solo).
   --ambiente NOMBRE     dev (por defecto), test o produccion.
   --bucket NOMBRE       Bucket S3. Por defecto sri-txt-robot-<cuenta>-<ambiente>.
   --tipos LISTA         Tipos separados por comas (por defecto 01).
-  --perfil RUTA         Perfil de Chrome calentado (~/.sri-txt-robot/perfil).
+  --perfil RUTA         Perfil de Chrome calentado. Para Lambda debe haberse
+                        calentado dentro de Linux (~/.sri-txt-robot/perfil-linux).
   --funcion NOMBRE      Nombre de la función de Lambda (sri-txt-robot).
   --region REGION       Región de AWS (AWS_REGION o us-east-1).
   --cron EXPRESION      Frecuencia de EventBridge (mensual por defecto).
-  --memoria MB          Memoria de la función (2048).
+  --memoria MB          Memoria de la función (3008).
   --timeout SEGUNDOS    Tiempo máximo de la función (900).
   --actualizar          Vuelve a desplegar aunque la función ya exista.
   -h, --help            Muestra esta ayuda.
@@ -187,7 +188,7 @@ cat > deploy/build/config/robots.yaml <<YAML
 version: 1
 
 portal:
-  perfil_dir: "/opt/perfil"
+  perfil_dir: "/tmp/perfil"
   # En el contenedor se usa Xvfb: Chrome "con ventana" no se anuncia como
   # HeadlessChrome y el portal responde.
   headless: false
@@ -309,7 +310,7 @@ aws lambda add-permission --function-name "$FUNCION" --region "$REGION" \
     --statement-id "${REGLA}-invocar" --action lambda:InvokeFunction \
     --principal events.amazonaws.com --source-arn "$ARN_REGLA" >/dev/null 2>&1 || true
 aws events put-targets --rule "$REGLA" --region "$REGION" \
-    --targets "Id=robot,Arn=${ARN_FUNCION},Input={}" >/dev/null
+    --targets "Id=robot,Arn=${ARN_FUNCION}" >/dev/null
 echo "Configurada."
 
 echo
