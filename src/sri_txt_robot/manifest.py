@@ -1,10 +1,16 @@
 """Extracción de claves de acceso desde el TXT de comprobantes recibidos.
 
-El reporte TXT del SRI es un listado de los comprobantes del período con, entre
-otros datos, la **clave de acceso** de 49 dígitos de cada comprobante. El
-formato exacto del archivo no está publicado por el SRI, por lo que la
-extracción se basa en el patrón de la clave (49 dígitos) y no en posiciones
-fijas de columnas.
+Formato real del reporte (verificado con una descarga del portal, octubre de
+2026): **TSV con fila de encabezado**, sin BOM y con saltos de línea ``LF``::
+
+    RUC_EMISOR  RAZON_SOCIAL_EMISOR  TIPO_COMPROBANTE  SERIE_COMPROBANTE
+    CLAVE_ACCESO  FECHA_AUTORIZACION  FECHA_EMISION  IDENTIFICACION_RECEPTOR
+    VALOR_SIN_IMPUESTOS  IVA  IMPORTE_TOTAL  NUMERO_DOCUMENTO_MODIFICADO
+
+Son 12 columnas separadas por tabuladores; la clave de acceso de 49 dígitos es
+la quinta. La extracción se hace **por nombre de columna**, no por posición, y
+se valida con el dígito verificador módulo 11. Si el archivo no trae encabezado
+reconocible, se recurre al patrón de 49 dígitos.
 
 Esa clave es el dato que necesita el paquete ``sri-comprobantes-php`` para
 consultar el XML autorizado de cada comprobante.
@@ -22,28 +28,65 @@ PATRON_CLAVE = re.compile(r"(?<!\d)(\d{49})(?!\d)")
 #: Longitud de la base (48 dígitos) sobre la que se calcula el verificador.
 LONGITUD_BASE = 48
 
+#: Nombre de la columna que contiene la clave de acceso.
+COLUMNA_CLAVE = "CLAVE_ACCESO"
+
+#: Separador de columnas del reporte.
+SEPARADOR = "\t"
+
 
 def extraer_claves(contenido: bytes | str) -> tuple[str, ...]:
     """Extrae las claves de acceso de un TXT, sin duplicados y en orden.
 
-    Solo se aceptan claves cuyo dígito verificador módulo 11 sea correcto, lo
-    que evita arrastrar números de 49 dígitos que no son claves de acceso.
+    Primero se interpreta el archivo como TSV con encabezado y se toma la
+    columna ``CLAVE_ACCESO``. Si eso no produce claves, se buscan números de 49
+    dígitos en todo el texto. En ambos casos solo se aceptan claves con el
+    dígito verificador módulo 11 correcto, lo que evita arrastrar números que
+    no son claves de acceso.
     """
     texto = contenido.decode("utf-8", errors="replace") if isinstance(contenido, bytes) else contenido
 
-    vistos: set[str] = set()
     claves: list[str] = []
+    vistos: set[str] = set()
 
-    for coincidencia in PATRON_CLAVE.finditer(texto):
-        clave = coincidencia.group(1)
+    def agregar(candidata: str) -> None:
+        clave = candidata.strip()
         if clave in vistos:
-            continue
+            return
         if not verificador_valido(clave):
-            continue
+            return
         vistos.add(clave)
         claves.append(clave)
 
+    indice = _indice_columna_clave(texto)
+    if indice is not None:
+        for linea in texto.splitlines()[1:]:
+            if not linea.strip():
+                continue
+            campos = linea.split(SEPARADOR)
+            if len(campos) > indice:
+                agregar(campos[indice])
+
+    if claves:
+        return tuple(claves)
+
+    for coincidencia in PATRON_CLAVE.finditer(texto):
+        agregar(coincidencia.group(1))
+
     return tuple(claves)
+
+
+def _indice_columna_clave(texto: str) -> int | None:
+    """Devuelve el índice de la columna de la clave en el encabezado."""
+    encabezado = texto.split("\n", 1)[0]
+    if SEPARADOR not in encabezado:
+        return None
+
+    columnas = [columna.strip().upper() for columna in encabezado.split(SEPARADOR)]
+    try:
+        return columnas.index(COLUMNA_CLAVE)
+    except ValueError:
+        return None
 
 
 def verificador_valido(clave: str) -> bool:

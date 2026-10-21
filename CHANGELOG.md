@@ -6,6 +6,43 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 
 ## [Unreleased]
 
+### Añadido
+
+- **Perfil de Chrome dedicado y calentado** (`portal.perfil_dir`): el portal
+  solo acepta el reCAPTCHA de un perfil que ya recibió una consulta hecha por
+  una persona. El robot lanza Chrome sin las banderas de automatización de
+  Playwright y se conecta por CDP, así que después de un clic manual todas las
+  descargas son automáticas.
+- Comando `sri-txt-robot calentar`: abre el perfil dedicado, espera la consulta
+  manual y lo deja habilitado.
+- Descarga de **varios períodos en una sola ejecución**: `-p` es repetible
+  (`-p 2026-07 -p 2026-08 -p 2026-09`) y también acepta listas separadas por
+  comas. El evento de Lambda acepta `periodos` (y mantiene `periodo`).
+- **Cierre de sesión** al terminar todas las descargas, desde el menú superior
+  derecho del portal, incluso si algún período falló.
+- El robot intenta primero el captcha con el propio navegador y solo recurre a
+  anti-captcha si el portal lo rechaza.
+
+### Corregido
+
+- El portal no responde a Chromium cuando se identifica como headless ni cuando
+  negocia HTTP/2: se fija un User-Agent de Chrome de escritorio y
+  `--disable-http2`. Sin esto todas las ejecuciones acababan en
+  `chrome-error://chromewebdata/`.
+- Una sesión guardada caducada (`about:blank`, página de error) ya no se toma
+  por una sesión válida.
+- El manifiesto de cada período ya solo incluye las descargas de ese período.
+- La pantalla de comprobantes se abre con `accederAplicacion.jspa` (token de un
+  solo uso); la URL limpia del JSF devolvía al formulario de login.
+
+### Cambiado
+
+- Se elimina la supuesta ventana de descarga de 5 días: la consulta funciona
+  para meses cerrados y años anteriores. `period.py` solo valida los años que
+  ofrece el portal.
+- La clave pública del reCAPTCHA es fija (`6LdukTQsAAAAAIcciM4GZq4ibeyplUhmWvlScuQE`)
+  y el token debe ser de **Enterprise invisible v2**; los de v3 se rechazan.
+
 ## [0.1.0] - 2026-10-20
 
 ### Añadido

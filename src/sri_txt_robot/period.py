@@ -1,57 +1,42 @@
-"""Cálculo de la ventana de descarga del TXT.
+"""Cálculo del período de emisión que conviene descargar.
 
-El SRI solo habilita la descarga del reporte TXT de comprobantes recibidos
-durante los **cinco días** siguientes al cierre del período consultado. Fuera
-de esa ventana el portal responde "fuera de periodo" y el reporte ya no puede
-descargarse; en ese caso la alternativa es descargar los XML individuales.
+**No existe una ventana de cinco días.** Las guías de programas contables
+ecuatorianos hablan de cinco días para *importar* el reporte en el sistema
+contable, pero el portal del SRI no la aplica: verificado en octubre de 2026,
+se descargó septiembre de 2026 el día 20 y enero de 2022 sin problema.
 
-Fuente: manuales de uso del portal del SRI y guías de proveedores de software
-contable ecuatoriano (ZOFI, Dátil, TribuExcel), consultadas en octubre de 2026.
+El límite real es el desplegable *Periodo emisión*: ofrece los cinco años
+anteriores al actual (en octubre de 2026, de 2022 a 2026). Por eso el robot no
+bloquea períodos antiguos; solo elige el mes cerrado más reciente por defecto y
+avisa si el año queda fuera del desplegable.
 """
 
 from __future__ import annotations
 
 import calendar
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 
-#: Días hábiles/calendario que el SRI mantiene abierta la descarga del TXT.
-VENTANA_DIAS = 5
+#: Años que ofrece el desplegable del portal, contando el año en curso.
+ANIOS_EN_PORTAL = 5
 
 
 @dataclass(frozen=True, slots=True)
-class VentanaDescarga:
-    """Ventana temporal en la que un período puede descargarse como TXT."""
+class DisponibilidadPeriodo:
+    """Indica si un período puede consultarse en el portal."""
 
-    inicio: date
-    fin: date
-
-    def contiene(self, momento: date) -> bool:
-        return self.inicio <= momento <= self.fin
-
-    def dias_restantes(self, momento: date) -> int:
-        """Días que faltan para el cierre de la ventana (0 si ya cerró)."""
-        return max((self.fin - momento).days, 0)
+    anio: int
+    mes: int
+    anios_disponibles: tuple[int, ...]
 
     @property
-    def cerrada(self) -> bool:
-        return False
+    def disponible(self) -> bool:
+        return self.anio in self.anios_disponibles
 
 
 def fin_de_periodo(anio: int, mes: int) -> date:
     """Último día del mes indicado."""
     return date(anio, mes, calendar.monthrange(anio, mes)[1])
-
-
-def ventana_de_descarga(anio: int, mes: int, *, dias: int = VENTANA_DIAS) -> VentanaDescarga:
-    """Ventana de descarga del TXT para un período mensual.
-
-    La ventana arranca al día siguiente del cierre del período y se mantiene
-    abierta durante ``dias`` días.
-    """
-    cierre = fin_de_periodo(anio, mes)
-    inicio = cierre + timedelta(days=1)
-    return VentanaDescarga(inicio=inicio, fin=inicio + timedelta(days=dias - 1))
 
 
 def periodo_anterior(hoy: date) -> tuple[int, int]:
@@ -64,8 +49,22 @@ def periodo_anterior(hoy: date) -> tuple[int, int]:
 def sugerir_periodo(hoy: date) -> tuple[int, int]:
     """Período mensual recomendado según la fecha actual.
 
-    Dentro de los primeros días del mes conviene descargar el mes cerrado
-    anterior. Una vez vencido el plazo, el período anterior ya no está
-    disponible como TXT y conviene avisarlo al operador.
+    Es el último mes cerrado: el que todavía no se ha procesado en una
+    ejecución mensual típica. El portal permite, además, cualquier período de
+    los últimos cinco años.
     """
     return periodo_anterior(hoy)
+
+
+def anios_disponibles(hoy: date, *, cantidad: int = ANIOS_EN_PORTAL) -> tuple[int, ...]:
+    """Años que ofrece el desplegable del portal, de más reciente a más antiguo."""
+    return tuple(range(hoy.year, hoy.year - cantidad, -1))
+
+
+def disponibilidad(anio: int, mes: int, hoy: date, *, cantidad: int = ANIOS_EN_PORTAL) -> DisponibilidadPeriodo:
+    """Comprueba si el período cae dentro del desplegable del portal."""
+    return DisponibilidadPeriodo(
+        anio=anio,
+        mes=mes,
+        anios_disponibles=anios_disponibles(hoy, cantidad=cantidad),
+    )

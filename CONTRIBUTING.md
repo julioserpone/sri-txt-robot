@@ -46,8 +46,8 @@ simula con un doble de `httpx.post`. Para validar contra el portal real use
    `config/robots.yaml` está en `.gitignore`.
 
 5. **El robot es idempotente.** No duplique descargas ya hechas ni amplíe el
-   número de consultas al portal por su cuenta. El SRI solo habilita la
-   descarga del TXT durante 5 días tras el cierre del período.
+   número de consultas al portal por su cuenta. El portal no impone una ventana
+   de días, pero cada consulta cuesta un captcha y golpea al SRI.
 
 6. **No amplíe el alcance sin acuerdo.** El proyecto no emite comprobantes,
    no los autoriza y no genera XML. Eso es territorio de

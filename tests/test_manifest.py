@@ -80,7 +80,7 @@ def test_los_nombres_de_archivo_siguen_el_conv_pre_acordado() -> None:
         "1790012345001/2026-09/comprobantes-recibidos-01.txt"
     )
     assert nombre_claves("1790012345001", "2026-09", TipoComprobante.RETENCION) == (
-        "1790012345001/2026-09/comprobantes-recibidos-08.claves.json"
+        "1790012345001/2026-09/comprobantes-recibidos-07.claves.json"
     )
     assert nombre_manifiesto("1790012345001", "2026-09") == "1790012345001/2026-09/manifest.json"
 
@@ -90,10 +90,143 @@ def test_los_nombres_de_archivo_siguen_el_conv_pre_acordado() -> None:
     [
         ("01", TipoComprobante.FACTURA),
         ("03", TipoComprobante.LIQUIDACION_COMPRA),
-        ("05", TipoComprobante.NOTA_CREDITO),
-        ("07", TipoComprobante.NOTA_DEBITO),
-        ("08", TipoComprobante.RETENCION),
+        ("04", TipoComprobante.NOTA_CREDITO),
+        ("05", TipoComprobante.NOTA_DEBITO),
+        ("07", TipoComprobante.RETENCION),
     ],
 )
 def test_los_codigos_de_tipo_se_normalizan(codigo: str, esperado: TipoComprobante) -> None:
     assert TipoComprobante.desde_codigo(codigo) is esperado
+
+
+def test_los_codigos_de_tipo_admiten_una_sola_cifra() -> None:
+    assert TipoComprobante.desde_codigo("1") is TipoComprobante.FACTURA
+
+
+def test_los_valores_del_portal_no_se_confunden_con_codigos_oficiales() -> None:
+    # El portal numera sus opciones 1, 2, 3, 4 y 6; la ficha técnica usa
+    # 01, 03, 04, 05 y 07. La conversión debe ser explícita.
+    assert TipoComprobante.FACTURA.valor_portal == "1"
+    assert TipoComprobante.LIQUIDACION_COMPRA.valor_portal == "2"
+    assert TipoComprobante.NOTA_CREDITO.valor_portal == "3"
+    assert TipoComprobante.NOTA_DEBITO.valor_portal == "4"
+    assert TipoComprobante.RETENCION.valor_portal == "6"
+
+
+# -- Formato real del reporte del portal ---------------------------------
+
+CABECERA_REAL = "\t".join(
+    [
+        "RUC_EMISOR",
+        "RAZON_SOCIAL_EMISOR",
+        "TIPO_COMPROBANTE",
+        "SERIE_COMPROBANTE",
+        "CLAVE_ACCESO",
+        "FECHA_AUTORIZACION",
+        "FECHA_EMISION",
+        "IDENTIFICACION_RECEPTOR",
+        "VALOR_SIN_IMPUESTOS",
+        "IVA",
+        "IMPORTE_TOTAL",
+        "NUMERO_DOCUMENTO_MODIFICADO",
+    ]
+)
+
+CLAVE_FACTURA = "1509202601179001234500120010010000001231234567812"
+CLAVE_NOTA_CREDITO = "1509202604179001234500120010010000004561234567812"
+CLAVE_RETENCION = "1509202607179001234500120010010000007891234567812"
+
+
+def _reporte_real(*filas: tuple[str, ...]) -> str:
+    return "\n".join([CABECERA_REAL, *("\t".join(fila) for fila in filas)]) + "\n"
+
+
+def test_extrae_la_clave_de_la_columna_del_encabezado() -> None:
+    contenido = _reporte_real(
+        (
+            "1791927966001",
+            "PLAN AUTOMOTOR ECUATORIANO PLANAUTOMOTOR S.A.S.",
+            "Factura",
+            "001-001-003031644",
+            CLAVE_FACTURA,
+            "01/09/2026 19:03:21",
+            "01/09/2026",
+            "1758871873",
+            "56.32",
+            "8.2",
+            "64.52",
+            "",
+        ),
+        (
+            "1790041220001",
+            "COMERCIAL KYWI S.A.",
+            "Notas de Crédito",
+            "001-001-000000456",
+            CLAVE_NOTA_CREDITO,
+            "02/09/2026 17:49:40",
+            "02/09/2026",
+            "1758871873",
+            "4.21",
+            "0.51",
+            "4.72",
+            "",
+        ),
+    )
+
+    assert extraer_claves(contenido) == (CLAVE_FACTURA, CLAVE_NOTA_CREDITO)
+
+
+def test_ignora_los_numeros_largos_de_otras_columnas() -> None:
+    # La razón social y la serie no deben confundirse con la clave aunque
+    # contengan cifras.
+    contenido = _reporte_real(
+        (
+            "1791927966001",
+            "1234567890123456789012345678901234567890123456789",
+            "Factura",
+            "001-001-003031644",
+            CLAVE_RETENCION,
+            "01/09/2026 19:03:21",
+            "01/09/2026",
+            "1758871873",
+            "56.32",
+            "8.2",
+            "64.52",
+            "",
+        )
+    )
+
+    assert extraer_claves(contenido) == (CLAVE_RETENCION,)
+
+
+def test_si_no_hay_encabezado_recurre_al_patron_de_49_digitos() -> None:
+    contenido = f"Reporte sin encabezado\nCA:{CLAVE_FACTURA}\n"
+
+    assert extraer_claves(contenido) == (CLAVE_FACTURA,)
+
+
+def test_un_encabezado_sin_la_columna_de_clave_recurre_al_patron() -> None:
+    contenido = f"RUC_EMISOR\tRAZON_SOCIAL_EMISOR\n1791927966001\tPLAN AUTOMOTOR\t{CLAVE_FACTURA}\n"
+
+    assert extraer_claves(contenido) == (CLAVE_FACTURA,)
+
+
+def test_el_parser_admite_el_txt_como_bytes() -> None:
+    contenido = _reporte_real(
+        (
+            "1791927966001",
+            "PLAN AUTOMOTOR",
+            "Factura",
+            "001-001-003031644",
+            CLAVE_FACTURA,
+            "01/09/2026 19:03:21",
+            "01/09/2026",
+            "1758871873",
+            "56.32",
+            "8.2",
+            "64.52",
+            "",
+        )
+    )
+
+    assert extraer_claves(contenido.encode("utf-8")) == (CLAVE_FACTURA,)

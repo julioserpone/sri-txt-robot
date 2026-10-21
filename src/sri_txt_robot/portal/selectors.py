@@ -28,6 +28,8 @@ class Selectores:
     acuerdo: dict[str, list[str]]
     menu: dict[str, list[str]]
     consulta: dict[str, list[str]]
+    captcha: dict[str, list[str]]
+    sesion: dict[str, list[str]]
 
     @classmethod
     def cargar(cls, path: str | Path) -> Selectores:
@@ -44,6 +46,8 @@ class Selectores:
             acuerdo=_grupo(datos, "acuerdo"),
             menu=_grupo(datos, "menu"),
             consulta=_grupo(datos, "consulta"),
+            captcha=_grupo(datos, "captcha"),
+            sesion=_grupo(datos, "sesion"),
         )
 
     def grupo(self, pantalla: str, clave: str) -> list[str]:
@@ -53,8 +57,15 @@ class Selectores:
             "acuerdo": self.acuerdo,
             "menu": self.menu,
             "consulta": self.consulta,
+            "captcha": self.captcha,
+            "sesion": self.sesion,
         }
         return grupos[pantalla].get(clave, [])
+
+    def valor(self, pantalla: str, clave: str) -> str:
+        """Devuelve el primer valor de un campo escalar (URL, acción, clave)."""
+        alternativas = self.grupo(pantalla, clave)
+        return alternativas[0].strip() if alternativas else ""
 
 
 def _grupo(datos: dict[str, Any], nombre: str) -> dict[str, list[str]]:

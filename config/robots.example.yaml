@@ -13,6 +13,11 @@ captcha:
   api_key_env: "ANTICAPTCHA_API_KEY"
   # Tipos de tarea a probar, en orden de preferencia. El robot usa el primero
   # que devuelva un token válido.
+  #
+  # El portal del SRI usa un widget de reCAPTCHA Enterprise *invisible* y valida
+  # el token como reCAPTCHA v2: un token v3 (generado con
+  # `grecaptcha.enterprise.execute({action})`) se rechaza con "No se pudo
+  # validar el captcha en google". Por eso los tipos V2 Enterprise van primero.
   task_types:
     - "RecaptchaV2EnterpriseTaskProxyless"
     - "RecaptchaV2TaskProxyless"
@@ -21,20 +26,43 @@ captcha:
   poll_interval_seconds: 3
   poll_timeout_seconds: 180
   report_outcomes: true
+  # Intentar primero que el propio navegador resuelva el captcha. En un
+  # Chromium con sesión real suele funcionar y no cuesta nada; si el portal lo
+  # rechaza, se recurre a anti-captcha.
+  intentar_en_navegador: true
 
 portal:
   base_url: "https://srienlinea.sri.gob.ec"
-  login_url: "https://srienlinea.sri.gob.ec/tuportal-internet/"
+  # Punto de entrada: redirige al formulario de Keycloak (realm "Internet").
+  login_url: "https://srienlinea.sri.gob.ec/sri-en-linea/contribuyente/perfil"
   headless: true
   timeout_ms: 45000
   navigation_timeout_ms: 60000
   locale: "es-EC"
   timezone: "America/Guayaquil"
-  # Si se deja vacío, Playwright usa el User-Agent del navegador empaquetado.
+  # User-Agent del navegador. Si se deja vacío se usa el de un Chrome de
+  # escritorio: el portal no responde a navegadores identificados como
+  # headless. El robot además lanza Chromium con --disable-http2 porque el
+  # portal deja la petición colgada al negociar HTTP/2.
   user_agent: ""
   viewport_width: 1440
   viewport_height: 900
   download_dir: "/tmp/sri-downloads"
+
+  # Perfil de Chrome dedicado. Déjelo vacío para el modo clásico (Playwright
+  # lanza Chromium con sus banderas de automatización). Si lo define, el robot
+  # arranca Chrome SIN esas banderas y se conecta por CDP.
+  #
+  # El portal solo acepta el reCAPTCHA de un perfil que ya recibió una consulta
+  # hecha por una persona. El flujo es:
+  #   1) sri-txt-robot calentar     (abra Chrome, haga una consulta a mano)
+  #   2) sri-txt-robot descargar -p 2026-07 -p 2026-08 -p 2026-09
+  # Con el perfil caliente, las descargas son completamente automáticas.
+  # En macOS este modo necesita una ventana visible: 'headless' se ignora.
+  perfil_dir: ""
+  # Ruta al ejecutable de Chrome. Vacío = detección automática (macOS:
+  # /Applications/Google Chrome.app; en Linux, el Chromium de Playwright).
+  chrome_path: ""
 
 storage:
   # Bucket de S3 para los TXT y los manifiestos. Si está vacío se usa
@@ -44,24 +72,24 @@ storage:
   local_dir: "./datos"
 
 robots:
-  # Contribuyente persona jurídica (RUC de 13 dígitos: la clave del portal es
-  # el RUC y el 'ciAdicional' es el dígito verificador).
+  # Contribuyente con RUC de 13 dígitos: se escribe tal cual en el campo
+  # "RUC / C.I. / Pasaporte". El campo "C.I. adicional" es opcional y solo se
+  # envía si se configura 'clave_adicional'.
   - ruc: "1790012345001"
     password_env: "SRI_PASSWORD_1790012345001"
-    clave_adicional: "1"
     etiqueta: "Contribuyente de prueba"
     tipos:
       - "01"   # Factura
       - "03"   # Liquidación de compra de bienes y prestación de servicios
-      - "05"   # Nota de crédito
-      - "07"   # Nota de débito
-      - "08"   # Comprobantes de retención
+      - "04"   # Nota de crédito
+      - "05"   # Nota de débito
+      - "07"   # Comprobante de retención
     activo: true
 
-  # Contribuyente persona natural (RUC de 10 dígitos: no necesita
-  # 'clave_adicional').
+  # Contribuyente persona natural: se puede configurar la cédula de 10 dígitos
+  # y el robot la completa con "001" al iniciar sesión.
   # - ruc: "1234567890"
   #   password: "${SRI_PASSWORD_1234567890}"
   #   etiqueta: "Persona natural"
-  #   tipos: ["01", "05"]
+  #   tipos: ["01", "04"]
   #   activo: false

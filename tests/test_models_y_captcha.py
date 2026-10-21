@@ -11,15 +11,26 @@ from sri_txt_robot.captcha.anticaptcha import AntiCaptchaClient, AntiCaptchaErro
 from sri_txt_robot.models import Credenciales, Periodo
 
 
-def test_un_ruc_de_13_digitos_exige_clave_adicional() -> None:
-    with pytest.raises(ValueError, match="clave adicional"):
-        Credenciales(ruc="1790012345001", password="x")
-
-
-def test_un_ruc_de_10_digitos_no_exige_clave_adicional() -> None:
-    credenciales = Credenciales(ruc="1234567890", password="x")
+def test_un_ruc_de_13_digitos_no_exige_clave_adicional() -> None:
+    # El portal pide "C.I. adicional" solo en algunos casos; con el RUC de 13
+    # dígitos se puede entrar sin ese dato (verificado contra el portal real).
+    credenciales = Credenciales(ruc="1790012345001", password="x")
 
     assert credenciales.requiere_clave_adicional is False
+    assert credenciales.usuario_portal == "1790012345001"
+
+
+def test_una_cedula_de_10_digitos_se_completa_con_001_en_el_portal() -> None:
+    credenciales = Credenciales(ruc="1234567890", password="x")
+
+    assert credenciales.usuario_portal == "1234567890001"
+    assert credenciales.requiere_clave_adicional is False
+
+
+def test_la_clave_adicional_es_opcional() -> None:
+    credenciales = Credenciales(ruc="1790012345001", password="x", clave_adicional="1234567890")
+
+    assert credenciales.requiere_clave_adicional is True
 
 
 def test_un_ruc_no_numerico_se_rechaza() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -11,15 +12,16 @@ from typing import Annotated
 import typer
 
 from .captcha.anticaptcha import AntiCaptchaClient
+from .captcha.inject import detectar_accion, detectar_sitekey, es_enterprise, es_invisible
 from .config import ConfigError, RobotConfig, cargar_config
 from .logging import configurar_logging, obtener_logger
 from .manifest import extraer_claves
 from .models import Periodo, TipoComprobante
-from .period import sugerir_periodo, ventana_de_descarga
+from .period import disponibilidad, sugerir_periodo
 from .pipeline import Opciones, Robot
 from .portal.login import iniciar_sesion
-from .portal.received import ConsultaSRIError, navegar_a_recibidos
-from .portal.selectors import Selectores
+from .portal.received import ConsultaSRIError, navegar_a_recibidos, texto_mensajes
+from .portal.selectors import Selectores, primer_visible
 from .portal.session import Navegador
 from .storage import crear_almacenamiento
 
@@ -46,9 +48,16 @@ def descargar(
         Path,
         typer.Option("--selectors", "-s", help="Archivo YAML de selectores."),
     ] = Path(SELECTORES_POR_DEFECTO),
-    periodo: Annotated[
-        str | None,
-        typer.Option("--periodo", "-p", help="Período a descargar en formato YYYY-MM."),
+    periodos: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--periodo",
+            "-p",
+            help=(
+                "Período a descargar en formato YYYY-MM o YYYY-MM-DD. Repetible: "
+                "-p 2026-07 -p 2026-08 -p 2026-09. Si se omite, se usa el mes cerrado anterior."
+            ),
+        ),
     ] = None,
     ruc: Annotated[
         str | None,
@@ -70,25 +79,25 @@ def descargar(
     configuracion = _cargar(config)
     catalogo = _cargar_selectores(selectores)
 
-    periodo_objetivo = _resolver_periodo(periodo)
+    periodos_objetivo = _resolver_periodos(periodos)
     tipos_objetivo = tuple(TipoComprobante.desde_codigo(codigo) for codigo in (tipos or []))
 
-    ventana = ventana_de_descarga(periodo_objetivo.anio, periodo_objetivo.mes)
-    hoy = date.today()
-    if not ventana.contiene(hoy):
-        typer.secho(
-            f"AVISO: el período {periodo_objetivo.clave} está fuera de la ventana de descarga "
-            f"del TXT (cerró el {ventana.fin.isoformat()}).",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
+    for periodo_objetivo in periodos_objetivo:
+        estado = disponibilidad(periodo_objetivo.anio, periodo_objetivo.mes, date.today())
+        if not estado.disponible:
+            typer.secho(
+                f"AVISO: el año {periodo_objetivo.anio} no está en el desplegable del portal "
+                f"(ofrece {estado.anios_disponibles[-1]}–{estado.anios_disponibles[0]}).",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
 
     almacenamiento = crear_almacenamiento(configuracion)
     robot = Robot(configuracion, catalogo, almacenamiento)
 
     resumen = robot.ejecutar(
         Opciones(
-            periodo=periodo_objetivo,
+            periodos=periodos_objetivo,
             tipos=tipos_objetivo,
             ruc=ruc or "",
             forzar=forzar,
@@ -115,6 +124,103 @@ def saldo(
     typer.echo(f"Saldo anti-captcha: USD {cliente.saldo():.4f}")
 
 
+@app.command("calentar")
+def calentar(
+    config: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Archivo YAML de configuración."),
+    ] = Path(CONFIG_POR_DEFECTO),
+    selectores: Annotated[
+        Path,
+        typer.Option("--selectors", "-s", help="Archivo YAML de selectores."),
+    ] = Path(SELECTORES_POR_DEFECTO),
+    ruc: Annotated[
+        str | None,
+        typer.Option("--ruc", "-r", help="RUC a usar para el calentamiento."),
+    ] = None,
+    espera: Annotated[
+        int,
+        typer.Option("--espera", help="Segundos que se espera la consulta manual."),
+    ] = 300,
+) -> None:
+    """Abre el perfil dedicado para que una persona resuelva el captcha una vez.
+
+    El portal solo acepta tokens de reCAPTCHA de un perfil que haya recibido al
+    menos una consulta hecha por una persona. Después de ese clic, el perfil
+    queda habilitado y el robot puede consultar todos los períodos sin
+    intervención. Ejecute este comando una vez, haga una consulta a mano y
+    cierre la ventana cuando el comando termine.
+    """
+    configurar_logging()
+    configuracion = _cargar(config)
+    catalogo = _cargar_selectores(selectores)
+
+    if not configuracion.portal.perfil_dir.strip():
+        typer.secho(
+            "Defina 'portal.perfil_dir' en la configuración: es el perfil de Chrome que se calienta aquí.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    rucs = configuracion.rucs_activos()
+    if ruc:
+        rucs = [item for item in rucs if item.ruc == ruc]
+    if not rucs:
+        typer.secho("No hay RUC configurados para calibrar.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    objetivo = rucs[0]
+    portal = configuracion.portal.model_copy(update={"headless": False})
+
+    with Navegador(portal) as navegador:
+        pagina = navegador.pagina
+        if pagina is None:
+            raise typer.Exit(code=1)
+
+        iniciar_sesion(
+            pagina,
+            objetivo.credenciales,
+            catalogo,
+            catalogo.valor("login", "url") or portal.login_url,
+        )
+        navegar_a_recibidos(pagina, catalogo)
+
+        typer.secho(
+            "\nSe abrió Chrome con el perfil dedicado.\n"
+            "1) Elija un mes cerrado y 'Todos' en el campo día.\n"
+            "2) Pulse 'Consultar' a mano y espere los resultados.\n"
+            "3) Vuelva a esta terminal: el comando termina solo.\n",
+            fg=typer.colors.CYAN,
+        )
+
+        limite = time.monotonic() + max(espera, 30)
+        while time.monotonic() < limite:
+            filas = 0
+            tabla = primer_visible(pagina, catalogo.grupo("consulta", "tabla_resultados"), timeout_ms=500)
+            if tabla is not None:
+                try:
+                    filas = tabla.locator("tbody tr").count()
+                except Exception:  # noqa: BLE001
+                    filas = 0
+            if filas or "no existen" in texto_mensajes(pagina, catalogo):
+                typer.secho(
+                    f"Perfil calentado: la consulta manual devolvió {filas} fila(s). "
+                    "Las próximas ejecuciones serán automáticas.",
+                    fg=typer.colors.GREEN,
+                )
+                return
+            time.sleep(2)
+
+    typer.secho(
+        "No se detectó ninguna consulta manual dentro del plazo. "
+        "Vuelva a ejecutar 'calentar' y pulse 'Consultar' en la ventana de Chrome.",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
 @app.command("periodo")
 def periodo(
     hoy: Annotated[
@@ -122,15 +228,15 @@ def periodo(
         typer.Option("--hoy", help="Fecha de referencia en formato YYYY-MM-DD."),
     ] = None,
 ) -> None:
-    """Muestra la ventana de descarga del TXT y el período sugerido."""
+    """Muestra el período sugerido y los años que ofrece el portal."""
     fecha = date.fromisoformat(hoy) if hoy else date.today()
     anio, mes = sugerir_periodo(fecha)
-    ventana = ventana_de_descarga(anio, mes)
+    estado = disponibilidad(anio, mes, fecha)
 
-    typer.echo(f"Fecha de referencia: {fecha.isoformat()}")
+    typer.echo(f"Fecha de referencia:  {fecha.isoformat()}")
     typer.echo(f"Período sugerido:     {anio:04d}-{mes:02d}")
-    typer.echo(f"Ventana de descarga:  {ventana.inicio.isoformat()} → {ventana.fin.isoformat()}")
-    typer.echo(f"Días restantes:       {ventana.dias_restantes(fecha)}")
+    typer.echo(f"Años en el portal:    {estado.anios_disponibles[-1]}–{estado.anios_disponibles[0]}")
+    typer.echo("Ventana de descarga:  no aplica; el portal permite cualquier período de esos años.")
 
 
 @app.command("calibrar")
@@ -177,7 +283,12 @@ def calibrar(
         if pagina is None:
             raise typer.Exit(code=1)
 
-        iniciar_sesion(pagina, objetivo.credenciales, catalogo)
+        iniciar_sesion(
+            pagina,
+            objetivo.credenciales,
+            catalogo,
+            catalogo.valor("login", "url") or configuracion.portal.login_url,
+        )
 
         try:
             navegar_a_recibidos(pagina, catalogo)
@@ -212,9 +323,15 @@ def calibrar(
             }"""
         )
 
-    (salida / "diagnostico.json").write_text(
-        json.dumps(diagnostico, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+        diagnostico["recaptcha"] = {
+            "sitekey": detectar_sitekey(pagina),
+            "accion": detectar_accion(pagina),
+            "enterprise": es_enterprise(pagina),
+            "invisible": es_invisible(pagina),
+            "campos": (diagnostico.get("recaptcha") or {}).get("campos", 0),
+        }
+
+    (salida / "diagnostico.json").write_text(json.dumps(diagnostico, ensure_ascii=False, indent=2), encoding="utf-8")
 
     typer.echo(f"Diagnóstico escrito en {salida.resolve()}")
     typer.echo(json.dumps(diagnostico.get("recaptcha", {}), ensure_ascii=False, indent=2))
@@ -253,11 +370,35 @@ def _cargar_selectores(ruta: Path) -> Selectores:
         raise typer.Exit(code=2) from error
 
 
-def _resolver_periodo(periodo: str | None) -> Periodo:
-    if periodo:
-        return Periodo.desde_texto(periodo)
-    anio, mes = sugerir_periodo(date.today())
-    return Periodo(anio=anio, mes=mes)
+def _resolver_periodos(valores: list[str] | None) -> tuple[Periodo, ...]:
+    """Convierte los períodos de la línea de comandos en objetos de dominio.
+
+    Admite valores repetidos (``-p 2026-07 -p 2026-08``) y listas separadas
+    por comas (``-p 2026-07,2026-08``), sin duplicados y en el orden indicado.
+    Sin valores se usa el mes cerrado anterior.
+    """
+    if not valores:
+        anio, mes = sugerir_periodo(date.today())
+        return (Periodo(anio=anio, mes=mes),)
+
+    periodos: list[Periodo] = []
+    vistos: set[str] = set()
+    for valor in valores:
+        for parte in valor.split(","):
+            texto = parte.strip()
+            if not texto:
+                continue
+            periodo = Periodo.desde_texto(texto)
+            if periodo.clave in vistos:
+                continue
+            vistos.add(periodo.clave)
+            periodos.append(periodo)
+
+    if not periodos:
+        anio, mes = sugerir_periodo(date.today())
+        return (Periodo(anio=anio, mes=mes),)
+
+    return tuple(periodos)
 
 
 def main() -> None:

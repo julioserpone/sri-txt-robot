@@ -2,8 +2,8 @@ AWSTemplateFormatVersion: "2010-09-29"
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Robot que descarga del portal del SRI los TXT de comprobantes electrónicos
-  recibidos y los publica en S3. Se ejecuta de forma programada dentro de la
-  ventana de 5 días que el SRI mantiene abierta para la descarga del TXT.
+  recibidos y los publica en S3. Se ejecuta de forma programada (mensual) y
+  admite varios períodos por invocación.
 
 Parameters:
   Stage:
@@ -28,11 +28,12 @@ Parameters:
 
   ScheduleExpression:
     Type: String
-    Default: "cron(0 9 1-5 * ? *)"
+    Default: "cron(0 9 3 * ? *)"
     Description: >
-      Programación de EventBridge. El valor por defecto ejecuta el robot los
-      días 1 a 5 de cada mes, que es la ventana en la que el SRI permite
-      descargar el TXT del mes cerrado anterior.
+      Programación de EventBridge. El valor por defecto ejecuta el robot el día
+      3 de cada mes para descargar el TXT del mes cerrado anterior. El portal no
+      impone ventana de días: se elige el día 3 para no consultar mientras el
+      mes recién cerrado aún se está consolidando.
 
   MemorySize:
     Type: Number
@@ -124,13 +125,13 @@ Resources:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub "${AWS::StackName}-${Stage}-schedule"
-      Description: Ventana de descarga del TXT del SRI (días 1 a 5 del mes).
+      Description: Descarga mensual del TXT de comprobantes recibidos del SRI.
       ScheduleExpression: !Ref ScheduleExpression
       State: ENABLED
       Targets:
         - Arn: !GetAtt RobotFunction.Arn
           Id: RobotFunction
-          Input: '{"periodo": ""}'
+          Input: '{"periodos": []}'
 
   RobotSchedulePermission:
     Type: AWS::Lambda::Permission

@@ -30,7 +30,7 @@ robots:
   - ruc: "1790012345001"
     password_env: "SRI_PASSWORD_1790012345001"
     clave_adicional: "1"
-    tipos: ["01", "08"]
+    tipos: ["01", "07"]
 """,
     )
 
@@ -43,9 +43,7 @@ robots:
     assert rucs[0].tipos == (TipoComprobante.FACTURA, TipoComprobante.RETENCION)
 
 
-def test_expande_las_variables_de_entorno_en_el_yaml(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_expande_las_variables_de_entorno_en_el_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CLAVE_DE_PRUEBA", "valor-secreto")
     ruta = _escribir(
         tmp_path,
@@ -140,9 +138,7 @@ robots:
     assert configuracion.rucs_activos() == []
 
 
-def test_la_clave_de_anticaptcha_se_lee_del_entorno(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_la_clave_de_anticaptcha_se_lee_del_entorno(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTICAPTCHA_API_KEY", "clave-de-prueba")
     ruta = _escribir(
         tmp_path,
@@ -159,9 +155,7 @@ robots: []
     assert configuracion.captcha.resolver_api_key() == "clave-de-prueba"
 
 
-def test_falla_si_no_hay_clave_de_anticaptcha(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_falla_si_no_hay_clave_de_anticaptcha(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTICAPTCHA_API_KEY", raising=False)
     ruta = _escribir(
         tmp_path,

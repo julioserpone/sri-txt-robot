@@ -14,13 +14,15 @@ from pathlib import Path
 from typing import Any
 
 from .captcha.anticaptcha import AntiCaptchaClient
-from .config import RobotConfig
+from .config import ConfigError, RobotConfig
 from .logging import obtener_logger
 from .manifest import extraer_claves, nombre_claves, nombre_manifiesto, nombre_txt
 from .models import ConfigRuc, Periodo, ResultadoDescarga, TipoComprobante
 from .portal.login import iniciar_sesion
+from .portal.logout import cerrar_sesion
 from .portal.received import (
     ConsultaSRIError,
+    SinDatosError,
     configurar_filtros,
     consultar_y_descargar,
     navegar_a_recibidos,
@@ -44,7 +46,7 @@ def _ahora() -> str:
 class Opciones:
     """Parámetros de una ejecución del robot."""
 
-    periodo: Periodo
+    periodos: tuple[Periodo, ...]
     tipos: tuple[TipoComprobante, ...] = ()
     ruc: str = ""
     forzar: bool = False
@@ -57,6 +59,7 @@ class Resumen:
 
     resultados: list[ResultadoDescarga] = field(default_factory=list)
     omitidos: list[str] = field(default_factory=list)
+    sin_datos: list[str] = field(default_factory=list)
     fallos: list[dict[str, str]] = field(default_factory=list)
 
     @property
@@ -67,6 +70,7 @@ class Resumen:
         return {
             "descargados": [resultado.a_dict() for resultado in self.resultados],
             "omitidos": self.omitidos,
+            "sinDatos": self.sin_datos,
             "fallos": self.fallos,
             "totalClaves": self.total_claves,
         }
@@ -84,9 +88,21 @@ class Robot:
         self._configuracion = configuracion
         self._selectores = selectores
         self._almacenamiento = almacenamiento
-        self._cliente_captcha = AntiCaptchaClient(
-            configuracion.captcha.resolver_api_key(),
-            api_url=configuracion.captcha.api_url,
+
+        # La clave de anti-captcha es opcional: si el navegador resuelve el
+        # captcha por su cuenta, no hace falta. Solo se exige cuando hay que
+        # recurrir al servicio.
+        try:
+            clave_captcha = configuracion.captcha.resolver_api_key()
+        except ConfigError:
+            clave_captcha = ""
+            logger.warning(
+                "sin clave de anti-captcha: solo se intentará el captcha del navegador",
+                extra={"variable": configuracion.captcha.api_key_env},
+            )
+
+        self._cliente_captcha = (
+            AntiCaptchaClient(clave_captcha, api_url=configuracion.captcha.api_url) if clave_captcha else None
         )
 
     def ejecutar(self, opciones: Opciones) -> Resumen:
@@ -103,7 +119,7 @@ class Robot:
             "iniciando ejecución del robot",
             extra={
                 "rucs": [ruc.ruc for ruc in rucs],
-                "periodo": opciones.periodo.clave,
+                "periodos": [periodo.clave for periodo in opciones.periodos],
                 "tipos": [tipo.value for tipo in opciones.tipos],
             },
         )
@@ -121,17 +137,25 @@ class Robot:
             logger.warning("no hay tipos de comprobante configurados", extra={"ruc": ruc.ruc})
             return
 
-        pendientes = [
-            tipo
-            for tipo in tipos
-            if opciones.forzar
-            or not self._almacenamiento.existe(nombre_txt(ruc.ruc, opciones.periodo.clave, tipo))
-        ]
-
-        omitidos = [tipo.value for tipo in tipos if tipo not in pendientes]
-        if omitidos:
-            logger.info("descargas omitidas por idempotencia", extra={"ruc": ruc.ruc, "tipos": omitidos})
-            resumen.omitidos.extend(f"{ruc.ruc}/{opciones.periodo.clave}/{codigo}" for codigo in omitidos)
+        # Se descarta por idempotencia cada combinación período × tipo que ya
+        # esté descargada, pero se abre una sola sesión para todos los períodos
+        # pedidos: es más rápido y menos expuesto para el portal.
+        pendientes: dict[str, list[TipoComprobante]] = {}
+        for periodo in opciones.periodos:
+            faltan = [
+                tipo
+                for tipo in tipos
+                if opciones.forzar or not self._almacenamiento.existe(nombre_txt(ruc.ruc, periodo.clave, tipo))
+            ]
+            omitidos = [tipo.value for tipo in tipos if tipo not in faltan]
+            if omitidos:
+                logger.info(
+                    "descargas omitidas por idempotencia",
+                    extra={"ruc": ruc.ruc, "periodo": periodo.clave, "tipos": omitidos},
+                )
+                resumen.omitidos.extend(f"{ruc.ruc}/{periodo.clave}/{codigo}" for codigo in omitidos)
+            if faltan:
+                pendientes[periodo.clave] = faltan
 
         if not pendientes:
             return
@@ -144,31 +168,51 @@ class Robot:
                 if pagina is None:
                     raise RuntimeError("No se pudo crear la página del navegador.")
 
-                iniciar_sesion(pagina, ruc.credenciales, self._selectores)
+                iniciar_sesion(
+                    pagina,
+                    ruc.credenciales,
+                    self._selectores,
+                    self._url_entrada(),
+                )
 
-                for tipo in pendientes:
-                    self._procesar_tipo(pagina, ruc, tipo, opciones, resumen)
+                try:
+                    for periodo in opciones.periodos:
+                        tipos_pendientes = pendientes.get(periodo.clave, [])
+                        if not tipos_pendientes:
+                            continue
+                        for tipo in tipos_pendientes:
+                            self._procesar_tipo(pagina, ruc, periodo, tipo, opciones, resumen)
+                        self._guardar_manifiesto(ruc.ruc, periodo, resumen)
+                finally:
+                    # Se cierra la sesión siempre, incluso si una descarga falló.
+                    if cerrar_sesion(pagina, self._selectores):
+                        # Las cookies quedaron invalidadas: no se guardan.
+                        navegador.olvidar_estado()
         except Exception as error:  # noqa: BLE001 - se registra y se continúa con el siguiente RUC
             logger.exception("fallo al procesar el RUC", extra={"ruc": ruc.ruc})
             resumen.fallos.append({"ruc": ruc.ruc, "error": str(error)})
-            return
-
-        self._guardar_manifiesto(ruc.ruc, opciones.periodo, resumen)
 
     def _procesar_tipo(
         self,
         pagina: Any,
         ruc: ConfigRuc,
+        periodo: Periodo,
         tipo: TipoComprobante,
         opciones: Opciones,
         resumen: Resumen,
     ) -> None:
-        clave_txt = nombre_txt(ruc.ruc, opciones.periodo.clave, tipo)
+        clave_txt = nombre_txt(ruc.ruc, periodo.clave, tipo)
         directorio = self._directorio_descargas()
 
         try:
             navegar_a_recibidos(pagina, self._selectores)
-            configurar_filtros(pagina, self._selectores, opciones.periodo, tipo)
+            configurar_filtros(
+                pagina,
+                self._selectores,
+                periodo,
+                tipo,
+                ruc=ruc.ruc,
+            )
 
             descarga: DescargaPortal = consultar_y_descargar(
                 pagina,
@@ -178,15 +222,22 @@ class Robot:
                 directorio,
                 max_intentos=opciones.max_intentos_captcha,
             )
+        except SinDatosError:
+            logger.info(
+                "el período no tiene comprobantes del tipo consultado",
+                extra={"ruc": ruc.ruc, "periodo": periodo.clave, "tipo": tipo.value},
+            )
+            resumen.sin_datos.append(f"{ruc.ruc}/{periodo.clave}/{tipo.value}")
+            return
         except ConsultaSRIError as error:
             logger.exception(
                 "fallo al descargar el TXT",
-                extra={"ruc": ruc.ruc, "periodo": opciones.periodo.clave, "tipo": tipo.value},
+                extra={"ruc": ruc.ruc, "periodo": periodo.clave, "tipo": tipo.value},
             )
             resumen.fallos.append(
                 {
                     "ruc": ruc.ruc,
-                    "periodo": opciones.periodo.clave,
+                    "periodo": periodo.clave,
                     "tipo": tipo.value,
                     "error": str(error),
                 }
@@ -197,19 +248,17 @@ class Robot:
                 "error inesperado al descargar el TXT",
                 extra={"ruc": ruc.ruc, "tipo": tipo.value},
             )
-            resumen.fallos.append(
-                {"ruc": ruc.ruc, "periodo": opciones.periodo.clave, "tipo": tipo.value, "error": str(error)}
-            )
+            resumen.fallos.append({"ruc": ruc.ruc, "periodo": periodo.clave, "tipo": tipo.value, "error": str(error)})
             return
 
         claves = extraer_claves(descarga.contenido)
 
         self._almacenamiento.guardar_txt(clave_txt, descarga.contenido)
         self._almacenamiento.guardar_json(
-            nombre_claves(ruc.ruc, opciones.periodo.clave, tipo),
+            nombre_claves(ruc.ruc, periodo.clave, tipo),
             {
                 "ruc": ruc.ruc,
-                "periodo": opciones.periodo.clave,
+                "periodo": periodo.clave,
                 "tipo": tipo.value,
                 "tipoEtiqueta": tipo.etiqueta,
                 "total": len(claves),
@@ -219,12 +268,12 @@ class Robot:
 
         resultado = ResultadoDescarga(
             ruc=ruc.ruc,
-            periodo=opciones.periodo,
+            periodo=periodo,
             tipo=tipo,
             clave_txt=clave_txt,
             claves_acceso=claves,
             bytes_txt=len(descarga.contenido),
-            tarea_captcha=descarga.solucion.task_type if descarga.solucion else "",
+            tarea_captcha=descarga.origen_captcha,
         )
         resumen.resultados.append(resultado)
 
@@ -232,7 +281,7 @@ class Robot:
             "TXT descargado",
             extra={
                 "ruc": ruc.ruc,
-                "periodo": opciones.periodo.clave,
+                "periodo": periodo.clave,
                 "tipo": tipo.value,
                 "claves": len(claves),
                 "bytes": len(descarga.contenido),
@@ -241,7 +290,11 @@ class Robot:
 
     def _guardar_manifiesto(self, ruc: str, periodo: Periodo, resumen: Resumen) -> None:
         """Guarda el manifiesto del período con el detalle de las descargas."""
-        descargas = [resultado.a_dict() for resultado in resumen.resultados if resultado.ruc == ruc]
+        descargas = [
+            resultado.a_dict()
+            for resultado in resumen.resultados
+            if resultado.ruc == ruc and resultado.periodo.clave == periodo.clave
+        ]
         self._almacenamiento.guardar_json(
             nombre_manifiesto(ruc, periodo.clave),
             {
@@ -252,6 +305,15 @@ class Robot:
                 "totalClaves": sum(descarga["totalClaves"] for descarga in descargas),
             },
         )
+
+    def _url_entrada(self) -> str:
+        """URL por la que se inicia la navegación al portal.
+
+        Se prefiere la que declara ``config/selectors.yaml`` porque el SSO del
+        SRI depende de ella; si no está, se usa la de la configuración.
+        """
+        return self._selectores.valor("login", "url") or self._configuracion.portal.login_url
+
     def _ruta_estado(self, ruc: str) -> Path:
         """Ruta del archivo que preserva la cookies de la sesión."""
         base = self._configuracion.portal.download_dir or "/tmp/sri-sesion"
