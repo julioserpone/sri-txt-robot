@@ -1,7 +1,12 @@
-# Imagen del robot. El runtime de Lambda (Amazon Linux 2023) comparte glibc
-# con Ubuntu 22.04, por lo que se instala Chromium con Playwright sobre la
-# imagen base de AWS Lambda en lugar de usar la imagen oficial de Playwright
-# (que está basada en Noble, glibc 2.39).
+# Imagen del robot.
+#
+# El runtime de Lambda para Python es Amazon Linux 2023, que usa `dnf` (no
+# `apt-get` como Ubuntu) y tiene glibc 2.35. Por eso NO se puede usar
+# `playwright install --with-deps`: las dependencias de sistema se instalan
+# con `dnf` de forma explícita, y el navegador se descarga sin `--with-deps`.
+#
+# La imagen oficial de Playwright está basada en Ubuntu Noble (glibc 2.39) y
+# no es compatible con el runtime de Lambda.
 FROM public.ecr.aws/lambda/python:3.12
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
@@ -12,13 +17,37 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
 
 WORKDIR /opt/robot
 
+# Dependencias de sistema que Chromium necesita en distribuciones de la
+# familia RHEL. Equivalen a las que instala `playwright install --with-deps`
+# en Ubuntu.
+RUN dnf install -y \
+        alsa-lib \
+        atk \
+        at-spi2-atk \
+        at-spi2-core \
+        cups-libs \
+        libdrm \
+        libXcomposite \
+        libXdamage \
+        libXext \
+        libXfixes \
+        libXrandr \
+        libxkbcommon \
+        mesa-libgbm \
+        nss \
+        pango \
+        cairo \
+        libX11 \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
 COPY pyproject.toml README.md ./
 COPY src ./src
 
 RUN pip install --upgrade pip \
     && pip install . \
-    && playwright install --with-deps chromium \
-    && playwright install chromium
+    && playwright install chromium \
+    && rm -rf /var/cache/dnf
 
 COPY config ./config
 
