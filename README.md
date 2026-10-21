@@ -78,10 +78,12 @@ manifiesto JSON de claves).
   una instancia EC2 siempre encendida.
 - Playwright necesita Chromium (~150 MB) y sus dependencias de sistema → **imagen
   de contenedor**, no un ZIP. La imagen se construye sobre
-  `public.ecr.aws/lambda/python:3.12` (Amazon Linux 2023, glibc 2.35) y
-  Chromium se instala con `playwright install --with-deps chromium`. La imagen
-  oficial de Playwright está basada en Noble (glibc 2.39) y **no** es
-  compatible con el runtime de Lambda.
+  `public.ecr.aws/lambda/python:3.12` (Amazon Linux 2023, glibc 2.35) con las
+  dependencias de sistema instaladas explícitamente con `dnf` y el navegador
+  descargado con `playwright install chromium`. Dos trampas: la base de Lambda
+  usa `dnf` y **no** `apt-get`, así que `playwright install --with-deps` falla;
+  y la imagen oficial de Playwright está basada en Noble (glibc 2.39), que **no**
+  es compatible con el runtime de Lambda.
 - Se reutiliza el stack que ya usas: SAM (`infra/template.yaml`), Secrets
   Manager para las claves y S3 para los resultados.
 - Alternativa si prefieres un servidor: el robot es un CLI (`sri-txt-robot
