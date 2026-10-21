@@ -1,0 +1,49 @@
+name: Solicitud de funcionalidad
+description: Proponga una mejora o un nuevo caso de uso
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de proponer, revise el alcance en el README. Este proyecto
+        automatiza la descarga del TXT de comprobantes recibidos; no genera
+        comprobantes ni los autoriza.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problema
+      description: Qué necesita resolver y por qué.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Propuesta
+      description: Comportamiento, comando o documentación deseada.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Ámbito
+      options:
+        - Portal / navegación
+        - reCAPTCHA
+        - Tipos de comprobante
+        - Períodos y ventana de descarga
+        - Almacenamiento
+        - AWS / despliegue
+        - Documentación
+        - Otro
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmación
+      options:
+        - label: No incluí secretos ni datos personales.
+          required: true
+        - label: Entiendo que la automatización del portal puede estar sujeta a las condiciones de uso del SRI.
+          required: true

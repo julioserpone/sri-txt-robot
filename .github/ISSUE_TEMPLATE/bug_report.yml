@@ -1,0 +1,68 @@
+name: Reporte de error
+description: Algo no funciona como se documenta
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por reportar. **No incluya RUC, claves del portal del SRI,
+        claves de anti-captcha, XML reales ni datos fiscales/personales.**
+        Para vulnerabilidades use el reporte privado de Security.
+  - type: input
+    id: version
+    attributes:
+      label: Versión del robot
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Versión de Python
+      placeholder: "3.12.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Ámbito
+      options:
+        - Login en el portal
+        - Resolución del reCAPTCHA
+        - Consulta y filtros del formulario
+        - Descarga del TXT
+        - Extracción de claves
+        - Publicación en S3
+        - Despliegue en AWS
+        - Otro
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Descripción
+      description: Qué esperaba y qué ocurrió.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Pasos para reproducir
+      description: Use datos ficticios. No pegue XML real ni claves de acceso.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs o mensajes (sin secretos)
+      render: text
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Confirmación
+      options:
+        - label: Confirmo que no incluí secretos ni datos personales.
+          required: true
+        - label: Entiendo que el TXT solo se descarga dentro de los 5 días posteriores al cierre del período.
+          required: true

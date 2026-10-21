@@ -1,5 +1,8 @@
 # SRI TXT Robot
 
+[![CI](https://github.com/julioserpone/sri-txt-robot/actions/workflows/ci.yml/badge.svg)](https://github.com/julioserpone/sri-txt-robot/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Robot que entra al portal del SRI, resuelve el reCAPTCHA con **anti-captcha**,
 consulta los comprobantes electrónicos **recibidos** y descarga el reporte
 **TXT** de cada tipo de comprobante.
@@ -18,7 +21,6 @@ consulta el XML autorizado de cada una por la API oficial.
                                                                    ▼
                                                             tu aplicación
 ```
-
 > **Este proyecto no está afiliado ni respaldado por el SRI.** Automatiza el
 > acceso de un contribuyente a **sus propios** comprobantes. Revise las
 > condiciones de uso del portal y las obligaciones de protección de datos
