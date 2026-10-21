@@ -4,38 +4,73 @@
 # un elemento visible. Así, un cambio menor del portal se corrige aquí, sin
 # tocar el código.
 #
-# Referencia técnica (verificada en octubre de 2026):
-#   - Login: Keycloak en /tuportal-internet/, acción
-#     /auth/realms/Internet/login-actions/authenticate.
-#   - App de comprobantes: /comprobantes-electronicos-internet/pages/*.jsf,
-#     autenticada vía /tuportal-internet/GeneraToken.jsp?urlAplicacion=...
-#   - Captcha: reCAPTCHA Enterprise; la clave pública se obtiene de
-#     /sri-captcha-servicio-internet/rest/ValidacionCaptcha/obtenerClavePublicaGoogleRecaptcha
+# Verificado contra el portal real en octubre de 2026. Las pantallas del SRI son
+# JSF con PrimeFaces: los identificadores llevan dos puntos (`frmPrincipal:ano`),
+# que en CSS se escriben entre corchetes (`[id="frmPrincipal:ano"]`) para no
+# tener que escaparlos.
 
 login:
-  # Campo del RUC en el formulario de Keycloak.
+  # Punto de entrada. No es el formulario: al abrirlo, el portal redirige a
+  # Keycloak (realm "Internet") y allí aparece el formulario de acceso.
+  # Iniciar siempre por esta URL: el SSO del portal se apoya en ella.
+  url: "https://srienlinea.sri.gob.ec/sri-en-linea/contribuyente/perfil"
+
+  # Campo "RUC / C.I. / Pasaporte".
   usuario:
+    - '[id="usuario"]'
+    - 'input[name="usuario"]'
     - "#usuario"
-    - "input[name='usuario']"
-    - "#username"
-  # Campo de la clave.
+
+  # Campo "Clave".
   clave:
+    - '[id="password"]'
+    - 'input[name="password"]'
     - "#password"
-    - "input[name='password']"
-  # Solo para RUC de 13 dígitos.
+
+  # Campo opcional "C.I. adicional".
   clave_adicional:
+    - '[id="ciAdicional"]'
+    - 'input[name="ciAdicional"]'
     - "#ciAdicional"
-    - "input[name='ciAdicional']"
+
   boton:
-    - "#kc-login"
-    - "input[name='login']"
+    - '[id="kc-login"]'
+    - 'input[name="login"]'
     - "button[type='submit']"
+
   # Mensajes de credenciales inválidas.
   error:
-    - ".alert-danger"
-    - ".kc-error-message"
     - "#input-error-username"
     - "#input-error-password"
+    - ".alert-error"
+    - ".kc-feedback-text"
+    - '[role="alert"]'
+
+  # Marca de que la sesión quedó establecida: el menú del contribuyente.
+  # Se usa solo si el portal no redirige fuera de Keycloak.
+  sesion_activa:
+    - 'a[href*="SriClaves"]'
+    - "text=Obligaciones"
+    - "text=CAMBIO DE CLAVE"
+
+sesion:
+  # Menú de la barra superior (icono "more_vert") que contiene "Cerrar sesión".
+  menu:
+    - "#topbar-menu-button"
+    - 'a[href*="mostrarOcultarToolbar"]'
+
+  # Enlace "Cerrar sesión". El propio portal hace
+  # location.replace('/tuportal-internet/salir.jspa'), que invalida la sesión
+  # de Keycloak.
+  cerrar:
+    - "a.boton-cerrar-legado"
+    - "a:has-text('Cerrar sesión')"
+
+  # Confirmación, si el portal la pide.
+  confirmar:
+    - "button:has-text('Aceptar')"
+    - "input[value='Aceptar']"
+    - "#botonAceptar"
 
 acuerdo:
   # Aviso de protección de datos que aparece en el primer ingreso.
@@ -46,65 +81,75 @@ acuerdo:
     - "input[value='Aceptar']"
 
 menu:
-  # Menú lateral: "Facturación Electrónica" → "Comprobantes electrónicos recibidos".
-  facturacion_electronica:
-    - "a:has-text('Facturación Electrónica')"
-    - "li:has-text('Facturación Electrónica') a"
-    - "span:has-text('Facturación Electrónica')"
+  # Alternativa a la URL directa: el enlace del portal que entrega el token de
+  # acceso a la aplicación JSF.
   comprobantes_recibidos:
-    - "a:has-text('Comprobantes electrónicos recibidos')"
-    - "a:has-text('Comprobantes electronicos recibidos')"
-    - "a:has-text('Comprobantes recibidos')"
+    - 'a[href*="accederAplicacion.jspa?redireccion=57"]'
+    - 'a:has-text("Comprobantes electrónicos recibidos")'
 
 consulta:
-  # URL directa de la pantalla de comprobantes recibidos. Si se deja vacía, el
-  # robot navega por el menú lateral. Rellénela en cuanto conozca la URL
-  # exacta: es más rápida y estable que el menú.
-  url_directa: ""
+  # URL de entrada a la aplicación JSF. **No** sirve la URL limpia
+  # /comprobantes-electronicos-internet/pages/...: al abrirla sin el token de un
+  # solo uso, el portal devuelve al formulario de Keycloak. `accederAplicacion`
+  # es el enlace del menú y entrega ese token; se puede abrir directamente con
+  # la sesión iniciada. Si se deja vacía, el robot pulsa
+  # `menu.comprobantes_recibidos`.
+  url_directa: "https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=57&idGrupo=55"
 
-  # Filtros de la pantalla "Comprobantes electrónicos recibidos".
+  # Campo "Ruc/Cédula/Pasaporte" de la consulta. Viene precargado con el RUC de
+  # la sesión; se escribe de forma explícita para el caso multi-RUC.
+  parametro:
+    - '[id="frmPrincipal:txtParametro"]'
+    - 'input[name="frmPrincipal:txtParametro"]'
+
+  # Filtros de período de emisión y tipo de comprobante.
   anio:
-    - "#anio"
-    - "select[name='anio']"
-    - "select[id*='anio' i]"
-    - "select[id*='Anio' i]"
+    - '[id="frmPrincipal:ano"]'
   mes:
-    - "#mes"
-    - "select[name='mes']"
-    - "select[id*='mes' i]"
+    - '[id="frmPrincipal:mes"]'
   dia:
-    - "#dia"
-    - "select[name='dia']"
-    - "select[id*='dia' i]"
+    - '[id="frmPrincipal:dia"]'
   tipo_comprobante:
-    - "#tipoComprobante"
-    - "select[name='tipoComprobante']"
-    - "select[id*='tipoComprobante' i]"
+    - '[id="frmPrincipal:cmbTipoComprobante"]'
 
-  # Botón que dispara la consulta (verificación con reCAPTCHA).
+  # Botón "Consultar". Su `onclick` dispara el reCAPTCHA y, en paralelo, un
+  # envío sin token que el portal rechaza: es el callback del captcha el que
+  # repite la consulta con el token válido.
   consultar:
-    - "button:has-text('Consultar')"
-    - "#btnConsultar"
-    - "input[value='Consultar']"
-    - "a:has-text('Consultar')"
+    - '[id="frmPrincipal:btnBuscar"]'
+    - '[name="frmPrincipal:btnBuscar"]'
 
-  # Enlace que descarga el reporte TXT.
+  # Enlace "Descargar reporte". Ejecuta un postback JSF que devuelve el TXT
+  # como descarga (solo existe cuando la consulta trajo resultados).
   descargar:
-    - "a:has-text('Descargar reporte')"
-    - "button:has-text('Descargar reporte')"
-    - "#descargarReporte"
-    - "a:has-text('Descargar Reporte')"
+    - '[id="frmPrincipal:lnkTxtlistado"]'
+    - 'a:has-text("Descargar reporte")'
 
-  # Tabla con los comprobantes recibidos.
+  # Tabla con los comprobantes recibidos. No existe si la consulta no trajo
+  # datos; en ese caso el portal deja el aviso en `mensajes`.
   tabla_resultados:
-    - "#tblComprobantes"
-    - "table[id*='omprobante' i]"
-    - ".dataTable"
-    - "table"
+    - '[id="frmPrincipal:tablaCompRecibidos"]'
+    - ".ui-datatable.sri-tabla"
 
-  # Mensaje que aparece cuando la consulta no devuelve comprobantes.
-  mensaje_sin_datos:
-    - ":has-text('No se encontraron comprobantes')"
-    - ":has-text('No existen comprobantes')"
-    - ":has-text('No se obtuvo resultados')"
-    - ":has-text('No hay resultados')"
+  # Contenedor de avisos del portal. Los textos conocidos son:
+  #   "No existen datos para los parámetros ingresados"  → consulta vacía
+  #   "Captcha incorrecta"                               → falta el token
+  #   "No se pudo validar el captcha en google"          → token rechazado
+  mensajes:
+    - '[id="formMessages:messages"]'
+    - ".ui-messages"
+
+  # Panel que el portal refresca con los resultados de la consulta.
+  panel_resultados:
+    - '[id="frmPrincipal:panelListaComprobantes"]'
+
+captcha:
+  # reCAPTCHA Enterprise con widget invisible. La clave pública está fija en el
+  # HTML de la pantalla de consulta: aparece en el `render` del script
+  # `enterprise.js` y en la llamada `cargarRecaptcha(...)`. Se deja aquí como
+  # respaldo; el robot la detecta en tiempo de ejecución.
+  sitekey: "6LdukTQsAAAAAIcciM4GZq4ibeyplUhmWvlScuQE"
+  # Acción con la que el portal ejecuta el captcha.
+  accion: "consulta_cel_recibidos"
+  # Contenedor donde el portal renderiza el widget invisible.
+  contenedor: "#recaptcha-container"

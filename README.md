@@ -3,9 +3,10 @@
 [![CI](https://github.com/julioserpone/sri-txt-robot/actions/workflows/ci.yml/badge.svg)](https://github.com/julioserpone/sri-txt-robot/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Robot que entra al portal del SRI, resuelve el reCAPTCHA con **anti-captcha**,
-consulta los comprobantes electrónicos **recibidos** y descarga el reporte
-**TXT** de cada tipo de comprobante.
+Robot que entra al portal del SRI, resuelve el reCAPTCHA (primero con el propio
+navegador, con **anti-captcha** como respaldo), consulta los comprobantes
+electrónicos **recibidos** de uno o varios meses y descarga el reporte **TXT**
+de cada tipo de comprobante. Al terminar, cierra la sesión.
 
 Es la pieza que falta entre el portal del SRI y el paquete
 [`sri-comprobantes-php`](https://github.com/julioserpone/sri-comprobantes-php):
@@ -36,24 +37,23 @@ octubre de 2026:
 
 | Aspecto | Detalle |
 | --- | --- |
-| **Login** | Keycloak en `/tuportal-internet/`; acción `/auth/realms/Internet/login-actions/authenticate`. Campos `usuario` (RUC), `ciAdicional` (solo RUC de 13 dígitos) y `password`. **El login no tiene reCAPTCHA.** |
-| **Sesión** | La app JSF `/comprobantes-electronicos-internet/pages/*.jsf` se abre vía `/tuportal-internet/GeneraToken.jsp?urlAplicacion=…`. |
-| **Captcha** | reCAPTCHA **Enterprise**. La clave pública **no** está fija en el HTML: en el portal nuevo se obtiene de `/sri-captcha-servicio-internet/rest/ValidacionCaptcha/obtenerClavePublicaGoogleRecaptcha`. El robot la detecta en tiempo de ejecución. |
+| **Login** | Keycloak en `/tuportal-internet/`; acción `/auth/realms/Internet/login-actions/authenticate`. Campos `usuario` (RUC de 13 dígitos), `ciAdicional` (opcional) y `password`. **El login no tiene reCAPTCHA.** |
+| **Sesión** | La app JSF (`/comprobantes-electronicos-internet/pages/consultas/recibidos/comprobantesRecibidos.jsf`) **no** se puede abrir por su URL limpia con la sesión iniciada: exige el token de un solo uso que entrega `/tuportal-internet/accederAplicacion.jspa?redireccion=57&idGrupo=55` y, si falta, devuelve al formulario de Keycloak. El robot usa esa URL de entrada. |
+| **Captcha** | reCAPTCHA **Enterprise invisible v2**. La clave pública sí está fija en el HTML: `6LdukTQsAAAAAIcciM4GZq4ibeyplUhmWvlScuQE`, con acción `consulta_cel_recibidos`. El servidor valida el token con semántica **v2**: un token v3 (`grecaptcha.enterprise.execute({action})`) se rechaza con *"No se pudo validar el captcha en google"*. |
 | **Pantalla** | *Facturación Electrónica → Comprobantes electrónicos recibidos*. Filtros: *Periodo de emisión* (año, mes, día — con **Todos** para el mes completo) y *Tipo de comprobante*. Acciones: **Consultar** (dispara el captcha) y **Descargar reporte** (entrega el TXT). |
 | **Salida** | El TXT lista los comprobantes con su *Clave de acceso (CA)* de 49 dígitos. |
-| **Ventana** | El TXT solo se descarga **5 días** tras el cierre del período. |
+| **Histórico** | **No hay ventana de 5 días**: en octubre de 2026 se descargaron TXT de septiembre de 2026 y de enero de 2022 sin problema. |
 
-### La ventana de 5 días (la restriction que manda sobre el diseño)
+### Sobre la supuesta ventana de 5 días
 
-El SRI solo habilita la descarga del reporte TXT durante los **cinco días**
-siguientes al cierre del período consultado. Pasado ese plazo la consulta
-responde *"fuera de periodo"* y el TXT ya no está disponible; la alternativa
-es descargar los XML individualmente.
+El manual del portal menciona un plazo para el reporte, pero la consulta real
+**no lo aplica**: el robot descarga meses cerrados y meses de años anteriores.
+Por eso `period.py` no bloquea períodos antiguos; solo valida que el año exista
+en el desplegable (`2022`–`2026` en la última revisión) y sugiere el mes cerrado
+anterior cuando no se indica ninguno.
 
-Por eso el robot **no es una herramienta bajo demanda**, sino un **trabajo
-programado**: el schedule por defecto (`cron(0 9 1-5 * ? *)`) lo ejecuta los
-días 1 a 5 de cada mes para el mes cerrado anterior. Ejecutarlo "cuando uno se
-acuerde" es tarde.
+El trabajo sigue siendo mensual (EventBridge), pero ya no es obligatorio
+ejecutarlo en los primeros días del mes: sirve también para recuperar históricos.
 
 ---
 
@@ -103,7 +103,23 @@ manifiesto JSON de claves).
   `g-recaptcha-response` **y** se sustituye `grecaptcha.getResponse()`, para
   cubrir tanto la lectura en servidor como la lectura por JavaScript.
 - **Sesión persistente:** se guarda el `storage_state` (cookies) por RUC para
-  no iniciar sesión en cada ejecución.
+  no iniciar sesión en cada ejecución. Solo se reutiliza si la pestaña quedó en
+  una página real del portal; un `about:blank` o una página de error de Chromium
+  fuerzan el login de nuevo.
+- **Cierre de sesión garantizado:** al terminar de descargar todos los períodos
+  pedidos se pulsa **Cerrar sesión** en el menú superior derecho
+  (`#topbar-menu-button` → `a.boton-cerrar-legado`), incluso si alguna descarga
+  falló. Se ejecuta en un `finally`, así que también corre cuando hay excepciones.
+- **Varios períodos por ejecución:** `-p` es repetible
+  (`-p 2026-07 -p 2026-08 -p 2026-09`, o `-p 2026-07,2026-08`). Se abre **una**
+  sesión y se recorre período × tipo dentro de ella.
+- **Navegador de escritorio, no "headless" identificable:** contra
+  `srienlinea.sri.gob.ec`, Chromium con su User-Agent de headless se queda
+  esperando para siempre (sin respuesta ni error de red) y termina en
+  `chrome-error://chromewebdata/`. Con un User-Agent de Chrome de escritorio y
+  `--disable-http2` la portada responde en décimas de segundo. Ambas cosas están
+  fijadas en `portal/session.py` y se pueden sobrescribir con
+  `portal.user_agent`.
 
 ---
 
@@ -146,7 +162,43 @@ export SRI_PASSWORD_1790012345001="..."
 Los secretos **nunca** se escriben en el YAML versionado: use `password_env` o
 la forma `${VARIABLE}`.
 
-### 3. Calibrar contra el portal real
+### 3. Calentar el perfil de Chrome
+
+El reCAPTCHA Enterprise del portal solo acepta tokens de un navegador que ya
+haya recibido **una consulta hecha por una persona**. Un perfil recién creado,
+aunque el robot haga clic con eventos reales (`isTrusted`, `userActivation`),
+recibe siempre `Captcha incorrecta`.
+
+El flujo tiene dos pasos y solo el primero necesita intervención:
+
+```bash
+# 1) Una sola vez: abre Chrome con el perfil dedicado y espera tu consulta
+sri-txt-robot calentar --config config/robots.yaml
+```
+
+En la ventana que se abre: elija un mes cerrado, deje el día en **Todos**,
+pulse **Consultar** a mano y espere los resultados. El comando termina solo y
+deja el perfil habilitado.
+
+```bash
+# 2) A partir de aquí, todo automático
+sri-txt-robot descargar -p 2026-07 -p 2026-08 -p 2026-09
+```
+
+Detalles que importan:
+
+- `portal.perfil_dir` debe apuntar a una carpeta **dedicada** (por ejemplo
+  `~/.sri-txt-robot/perfil`), nunca al perfil personal de Chrome.
+- El robot lanza Chrome **sin** las banderas de automatización de Playwright
+  (`--enable-automation`, `--remote-debugging-pipe`) y se conecta por CDP. Con
+  esas banderas el portal rechaza incluso un perfil ya calentado.
+- Este modo necesita una ventana visible: en macOS `headless` se ignora.
+- Si el portal vuelve a responder `Captcha incorrecta` (por ejemplo tras muchos
+  días o un cambio de red), repita `calentar`.
+- anti-captcha queda solo como respaldo opcional: el portal rechazó todos sus
+  tokens en las pruebas de octubre de 2026.
+
+### 4. Calibrar contra el portal real
 
 Este paso es **imprescindible**: la primera vez hay que confirmar que los
 selectores siguen vigentes. El comando inicia sesión, abre la pantalla de
@@ -164,10 +216,11 @@ Genera:
   reCAPTCHA con su clave pública.
 
 Con ese archivo se ajusta `config/selectors.yaml`. Si el robot no encuentra la
-pantalla, rellene `consulta.url_directa` con la URL directa de la pantalla de
-comprobantes recibidos.
+pantalla, revise `consulta.url_directa`: debe ser la URL del menú
+(`/tuportal-internet/accederAplicacion.jspa?redireccion=57&idGrupo=55`), no la
+URL limpia del JSF.
 
-### 4. Ejecutar
+### 5. Ejecutar
 
 ```bash
 # Período sugerido (mes anterior), todos los RUC y todos los tipos
@@ -176,7 +229,13 @@ sri-txt-robot descargar --config config/robots.yaml
 # Un RUC, un tipo y un período concretos
 sri-txt-robot descargar -r 1790012345001 -t 01 -p 2026-09
 
-# Ver la ventana de descarga y el período recomendado
+# Varios períodos en una sola sesión (se cierra al terminar)
+sri-txt-robot descargar -p 2026-07 -p 2026-08 -p 2026-09
+
+# Equivalente, con lista separada por comas
+sri-txt-robot descargar -p 2026-07,2026-08,2026-09
+
+# Ver los años que ofrece el portal y el período recomendado
 sri-txt-robot periodo
 
 # Ver el saldo de anti-captcha
@@ -186,15 +245,19 @@ sri-txt-robot saldo
 sri-txt-robot claves datos/1790012345001/2026-09/comprobantes-recibidos-01.txt
 ```
 
-### 5. Resultado
+### 6. Resultado
 
 ```text
 datos/
 └── 1790012345001/
+    ├── 2026-07/
+    │   ├── comprobantes-recibidos-01.txt
+    │   ├── comprobantes-recibidos-01.claves.json
+    │   └── manifest.json              # solo los tipos de ESE período
+    ├── 2026-08/
+    │   └── ...
     └── 2026-09/
-        ├── comprobantes-recibidos-01.txt          # TXT del portal
-        ├── comprobantes-recibidos-01.claves.json  # claves extraídas
-        └── manifest.json                           # resumen del período
+        └── ...
 ```
 
 El `.claves.json` es el contrato de entrada para el paquete PHP:
@@ -236,8 +299,12 @@ bucket y `secretsmanager:GetSecretValue` sobre el secreto).
 
 ```bash
 aws lambda invoke --function-name sri-txt-robot-prod \
-  --payload '{"periodo":"2026-09"}' --cli-binary-format raw-in-base64-out out.json
+  --payload '{"periodos":["2026-07","2026-08","2026-09"]}' \
+  --cli-binary-format raw-in-base64-out out.json
 ```
+
+El evento acepta `periodos` (lista) o `periodo` (un solo mes, por
+compatibilidad). Sin períodos se usa el mes cerrado anterior.
 
 ---
 
@@ -277,11 +344,11 @@ se reintentan.
 ```text
 src/sri_txt_robot/
 ├── captcha/       anti-captcha (cliente API) + inyección del token
-├── portal/        navegación: login Keycloak, pantalla de recibidos, sesión
+├── portal/        navegación: login Keycloak, captcha, recibidos, cierre de sesión, navegador
 ├── config.py      configuración validada con pydantic
 ├── manifest.py    extracción de claves de acceso (módulo 11 del SRI)
 ├── models.py      Período, tipo de comprobante, credenciales
-├── period.py      ventana de descarga de 5 días
+├── period.py      años disponibles y período sugerido
 ├── pipeline.py    orquestación RUC × período × tipo
 ├── storage.py     persistencia local o S3
 └── handler.py     entrada de AWS Lambda
@@ -308,14 +375,19 @@ el comando `calibrar` con un RUC de pruebas.
 - El portal puede cambiar el HTML, los identificadores o la ruta de la
   pantalla. `config/selectors.yaml` existe para amortiguar eso, pero una
   reescritura mayor del portal sí requerirá cambios en el robot.
-- Fuera de la ventana de 5 días el TXT no está disponible; el robot lo avisa
-  pero no puede resolverlo.
+- Fuera del rango de años que ofrece el portal (`2022`–`2026` en la última
+  revisión) la consulta no devuelve datos; el robot lo avisa antes de entrar
+  pero no puede ampliar el desplegable.
 - La extracción de claves del TXT se basa en el patrón de 49 dígitos con
   verificador módulo 11 (el mismo algoritmo de la ficha técnica v2.34 que usa
   `AccessKeyGenerator`), **no** en posiciones fijas de columna, porque el SRI no
   publica el formato del TXT.
 - El robot no descarga los XML: eso lo hace el paquete PHP contra la API
   oficial, una clave a la vez.
+- El reCAPTCHA Enterprise necesita un perfil de Chrome **calentado** con una
+  consulta manual (`sri-txt-robot calentar`) y una ventana visible. En AWS
+  Lambda eso implica Xvfb y un perfil ya calentado en la imagen; el perfil
+  puede caducar y entonces hace falta repetir el calentamiento en local.
 
 ## Consideraciones legales
 
@@ -327,5 +399,5 @@ credenciales. Aun así:
 - Los XML de terceros (proveedores) contienen datos personales de terceros: el
   paquete PHP recomienda cifrarlos en reposo, controlar su retención (7 años) y
   anonimizar los registros.
-- Límite las consultas: el robot ya es idempotente y respeta la ventana del
-  portal; no aumente la frecuencia de accesos por su cuenta.
+- Límite las consultas: el robot ya es idempotente; no aumente la frecuencia
+  de accesos al portal por su cuenta.

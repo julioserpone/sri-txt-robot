@@ -64,5 +64,5 @@ body:
       options:
         - label: Confirmo que no incluí secretos ni datos personales.
           required: true
-        - label: Entiendo que el TXT solo se descarga dentro de los 5 días posteriores al cierre del período.
+        - label: Entiendo que el robot necesita credenciales válidas del portal y que no debo adjuntarlas en el reporte.
           required: true

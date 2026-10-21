@@ -40,13 +40,13 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     selectores = Selectores.cargar(os.environ.get("SRI_ROBOT_SELECTORS", SELECTORES_POR_DEFECTO))
     almacenamiento = crear_almacenamiento(configuracion)
 
-    periodo = _periodo(event)
+    periodos = _periodos(event)
     tipos = tuple(TipoComprobante.desde_codigo(codigo) for codigo in event.get("tipos", []) or [])
 
     robot = Robot(configuracion, selectores, almacenamiento)
     resumen = robot.ejecutar(
         Opciones(
-            periodo=periodo,
+            periodos=periodos,
             tipos=tipos,
             ruc=str(event.get("ruc", "")),
             forzar=bool(event.get("forzar", False)),
@@ -54,12 +54,15 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     )
 
     respuesta = {
-        "periodo": periodo.clave,
+        "periodos": [periodo.clave for periodo in periodos],
         "ejecutadoEn": datetime.now(tz=UTC).isoformat(),
         **resumen.a_dict(),
     }
 
-    logger.info("ejecución finalizada", extra={"periodo": periodo.clave, "fallos": len(resumen.fallos)})
+    logger.info(
+        "ejecución finalizada",
+        extra={"periodos": [periodo.clave for periodo in periodos], "fallos": len(resumen.fallos)},
+    )
     return respuesta
 
 
@@ -101,13 +104,31 @@ def _inyectar_secretos() -> None:
     logger.info("secretos inyectados", extra={"cantidad": len(secreto)})
 
 
-def _periodo(event: dict[str, Any]) -> Periodo:
-    """Resuelve el período del evento; por defecto, el mes anterior."""
-    texto = str(event.get("periodo", "")).strip()
-    if texto:
-        return Periodo.desde_texto(texto)
+def _periodos(event: dict[str, Any]) -> tuple[Periodo, ...]:
+    """Resuelve los períodos del evento; por defecto, el mes anterior.
+
+    Acepta ``"periodos": ["2026-07", "2026-08"]`` y también ``"periodo"`` para
+    los eventos antiguos de un solo mes.
+    """
+    crudos = event.get("periodos")
+    if isinstance(crudos, str):
+        crudos = [crudos]
+    if not crudos and event.get("periodo"):
+        crudos = [str(event["periodo"])]
+
+    periodos: list[Periodo] = []
+    vistos: set[str] = set()
+    for crudo in crudos or []:
+        periodo = Periodo.desde_texto(str(crudo))
+        if periodo.clave in vistos:
+            continue
+        vistos.add(periodo.clave)
+        periodos.append(periodo)
+
+    if periodos:
+        return tuple(periodos)
 
     hoy = date.today()
     if hoy.month == 1:
-        return Periodo(anio=hoy.year - 1, mes=12)
-    return Periodo(anio=hoy.year, mes=hoy.month - 1)
+        return (Periodo(anio=hoy.year - 1, mes=12),)
+    return (Periodo(anio=hoy.year, mes=hoy.month - 1),)
