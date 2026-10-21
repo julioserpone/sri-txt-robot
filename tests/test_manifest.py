@@ -77,12 +77,28 @@ def test_acepta_bytes_con_codificacion_desconocida() -> None:
 
 def test_los_nombres_de_archivo_siguen_el_conv_pre_acordado() -> None:
     assert nombre_txt("1790012345001", "2026-09", TipoComprobante.FACTURA) == (
-        "1790012345001/2026-09/comprobantes-recibidos-01.txt"
+        "dev/1790012345001/2026-09/facturas-recibidas-2026-09.txt"
     )
-    assert nombre_claves("1790012345001", "2026-09", TipoComprobante.RETENCION) == (
-        "1790012345001/2026-09/comprobantes-recibidos-07.claves.json"
+    assert nombre_claves("1790012345001", "2026-09", TipoComprobante.RETENCION, ambiente="produccion") == (
+        "produccion/1790012345001/2026-09/retenciones-recibidas-2026-09-claves.json"
     )
-    assert nombre_manifiesto("1790012345001", "2026-09") == "1790012345001/2026-09/manifest.json"
+    assert nombre_manifiesto("1790012345001", "2026-09", ambiente="test") == (
+        "test/1790012345001/2026-09/manifest.json"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tipo", "archivo"),
+    [
+        (TipoComprobante.FACTURA, "facturas-recibidas-2026-09.txt"),
+        (TipoComprobante.LIQUIDACION_COMPRA, "liquidaciones-compra-recibidas-2026-09.txt"),
+        (TipoComprobante.NOTA_CREDITO, "notas-credito-recibidas-2026-09.txt"),
+        (TipoComprobante.NOTA_DEBITO, "notas-debito-recibidas-2026-09.txt"),
+        (TipoComprobante.RETENCION, "retenciones-recibidas-2026-09.txt"),
+    ],
+)
+def test_cada_tipo_tiene_un_nombre_reconocible(tipo: TipoComprobante, archivo: str) -> None:
+    assert nombre_txt("1790012345001", "2026-09", tipo, ambiente="test").endswith("/" + archivo)
 
 
 @pytest.mark.parametrize(

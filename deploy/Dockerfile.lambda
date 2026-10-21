@@ -1,0 +1,15 @@
+# Imagen final para Lambda: añade la configuración generada por
+# scripts/publicar.sh y el perfil de Chrome ya "calentado".
+#
+# El contexto de compilación es la raíz del repositorio; deploy/build/ lo crea
+# el script y está en .gitignore.
+FROM sri-txt-robot:base
+
+COPY deploy/build/config/ /opt/config/
+COPY deploy/build/perfil /opt/perfil
+COPY deploy/iniciar.sh /opt/iniciar.sh
+
+ENV DISPLAY=:99
+
+ENTRYPOINT ["/bin/sh", "/opt/iniciar.sh"]
+CMD ["sri_txt_robot.handler.handler"]

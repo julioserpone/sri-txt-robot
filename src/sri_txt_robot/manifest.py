@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 
-from .models import TipoComprobante
+from .models import AMBIENTE_POR_DEFECTO, TipoComprobante
 
 #: La clave de acceso del SRI tiene exactamente 49 dígitos.
 PATRON_CLAVE = re.compile(r"(?<!\d)(\d{49})(?!\d)")
@@ -114,16 +114,28 @@ def verificador_valido(clave: str) -> bool:
     return esperado == int(clave[LONGITUD_BASE])
 
 
-def nombre_txt(ruc: str, periodo: str, tipo: TipoComprobante) -> str:
-    """Construye el nombre lógico del TXT para un RUC, período y tipo."""
-    return f"{ruc}/{periodo}/comprobantes-recibidos-{tipo.value}.txt"
+def nombre_txt(ruc: str, periodo: str, tipo: TipoComprobante, *, ambiente: str = AMBIENTE_POR_DEFECTO) -> str:
+    """Construye la clave del TXT.
+
+    La jerarquía es ``ambiente/ruc/periodo/archivo`` para que el objeto se
+    pueda localizar y ordenar sin conocer el código del tipo::
+
+        produccion/1758871873001/2026-08/facturas-recibidas-2026-08.txt
+    """
+    return f"{_carpeta(ruc, periodo, ambiente)}/{tipo.slug}-recibidas-{periodo}.txt"
 
 
-def nombre_claves(ruc: str, periodo: str, tipo: TipoComprobante) -> str:
-    """Construye el nombre lógico del JSON con las claves extraídas."""
-    return f"{ruc}/{periodo}/comprobantes-recibidos-{tipo.value}.claves.json"
+def nombre_claves(ruc: str, periodo: str, tipo: TipoComprobante, *, ambiente: str = AMBIENTE_POR_DEFECTO) -> str:
+    """Construye la clave del JSON con las claves extraídas."""
+    return f"{_carpeta(ruc, periodo, ambiente)}/{tipo.slug}-recibidas-{periodo}-claves.json"
 
 
-def nombre_manifiesto(ruc: str, periodo: str) -> str:
-    """Construye el nombre lógico del manifiesto del período."""
-    return f"{ruc}/{periodo}/manifest.json"
+def nombre_manifiesto(ruc: str, periodo: str, *, ambiente: str = AMBIENTE_POR_DEFECTO) -> str:
+    """Construye la clave del manifiesto del período."""
+    return f"{_carpeta(ruc, periodo, ambiente)}/manifest.json"
+
+
+def _carpeta(ruc: str, periodo: str, ambiente: str) -> str:
+    """Devuelve ``ambiente/ruc/periodo`` omitiendo un ambiente vacío."""
+    partes = [ambiente.strip("/ "), ruc.strip("/ "), periodo.strip("/ ")]
+    return "/".join(parte for parte in partes if parte)

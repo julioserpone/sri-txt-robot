@@ -10,7 +10,10 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from .models import ConfigRuc, Credenciales, TipoComprobante
+from .models import AMBIENTE_POR_DEFECTO, ConfigRuc, Credenciales, TipoComprobante
+
+#: Formato admitido para el nombre del ambiente.
+_PATRON_AMBIENTE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 RUC_PATTERN = r"^\d{10}$|^\d{13}$"
 
@@ -82,11 +85,32 @@ class PortalConfig(_Base):
 
 
 class StorageConfig(_Base):
-    """Destino de los TXT descargados."""
+    """Destino de los TXT descargados.
+
+    Las claves se organizan por ``ambiente/ruc/periodo/archivo``. El ambiente
+    (``dev``, ``test`` o ``produccion``) permite tener los mismos datos de
+    varios entornos en un solo bucket.
+    """
 
     bucket: str = ""
-    prefix: str = "sri/txt"
+    prefix: str = ""
     local_dir: str = ""
+    ambiente: str = AMBIENTE_POR_DEFECTO
+
+    @field_validator("ambiente", mode="before")
+    @classmethod
+    def _validar_ambiente(cls, valor: Any) -> str:
+        return validar_ambiente(str(valor or ""))
+
+
+def validar_ambiente(valor: str) -> str:
+    """Normaliza y valida el nombre del ambiente."""
+    texto = valor.strip().lower()
+    if not _PATRON_AMBIENTE.fullmatch(texto):
+        raise ValueError(
+            f"Ambiente inválido: {valor!r}. Use un nombre simple, por ejemplo 'dev', 'test' o 'produccion'."
+        )
+    return texto
 
 
 class RobotEntry(_Base):
@@ -169,7 +193,35 @@ def cargar_config(path: str | Path) -> RobotConfig:
     datos = yaml.safe_load(contenido) or {}
     if not isinstance(datos, dict):
         raise ConfigError("El archivo de configuración debe contener un mapa YAML.")
-    return RobotConfig.model_validate(_expandir_en_valores(datos))
+    configuracion = RobotConfig.model_validate(_expandir_en_valores(datos))
+    return _aplicar_entorno(configuracion)
+
+
+def _aplicar_entorno(configuracion: RobotConfig) -> RobotConfig:
+    """Permite fijar ``storage.ambiente`` y ``storage.bucket`` por entorno.
+
+    La misma imagen de Lambda sirve para dev, test y producción cambiando solo
+    las variables ``SRI_AMBIENTE`` y ``SRI_BUCKET`` del despliegue.
+    """
+    cambios: dict[str, Any] = {}
+
+    crudo = os.environ.get("SRI_AMBIENTE", "").strip()
+    if crudo:
+        try:
+            cambios["ambiente"] = validar_ambiente(crudo)
+        except ValueError as error:
+            raise ConfigError(str(error)) from error
+
+    bucket = os.environ.get("SRI_BUCKET", "").strip()
+    if bucket:
+        cambios["bucket"] = bucket
+        # Un bucket explícito manda sobre la carpeta local del YAML.
+        cambios["local_dir"] = ""
+
+    if not cambios:
+        return configuracion
+
+    return configuracion.model_copy(update={"storage": configuracion.storage.model_copy(update=cambios)})
 
 
 def _expandir_en_valores(datos: Any) -> Any:

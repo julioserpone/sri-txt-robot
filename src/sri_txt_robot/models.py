@@ -28,6 +28,19 @@ _VALORES_PORTAL: dict[str, str] = {
 }
 
 
+#: Ambiente usado cuando no se indica otro.
+AMBIENTE_POR_DEFECTO = "dev"
+
+#: Nombre corto y estable de cada tipo, para los archivos de datos.
+_SLUGS: dict[str, str] = {
+    "01": "facturas",
+    "03": "liquidaciones-compra",
+    "04": "notas-credito",
+    "05": "notas-debito",
+    "07": "retenciones",
+}
+
+
 class TipoComprobante(StrEnum):
     """Códigos de tipo de comprobante electrónico del SRI.
 
@@ -56,6 +69,11 @@ class TipoComprobante(StrEnum):
     def valor_portal(self) -> str:
         """Valor de la opción en el ``select`` del portal."""
         return _VALORES_PORTAL[self.value]
+
+    @property
+    def slug(self) -> str:
+        """Nombre corto para los archivos: ``facturas``, ``notas-credito``…"""
+        return _SLUGS[self.value]
 
     @classmethod
     def desde_codigo(cls, codigo: str) -> TipoComprobante:

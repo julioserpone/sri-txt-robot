@@ -145,7 +145,8 @@ class Robot:
             faltan = [
                 tipo
                 for tipo in tipos
-                if opciones.forzar or not self._almacenamiento.existe(nombre_txt(ruc.ruc, periodo.clave, tipo))
+                if opciones.forzar
+                or not self._almacenamiento.existe(nombre_txt(ruc.ruc, periodo.clave, tipo, ambiente=self._ambiente()))
             ]
             omitidos = [tipo.value for tipo in tipos if tipo not in faltan]
             if omitidos:
@@ -201,7 +202,7 @@ class Robot:
         opciones: Opciones,
         resumen: Resumen,
     ) -> None:
-        clave_txt = nombre_txt(ruc.ruc, periodo.clave, tipo)
+        clave_txt = nombre_txt(ruc.ruc, periodo.clave, tipo, ambiente=self._ambiente())
         directorio = self._directorio_descargas()
 
         try:
@@ -255,12 +256,14 @@ class Robot:
 
         self._almacenamiento.guardar_txt(clave_txt, descarga.contenido)
         self._almacenamiento.guardar_json(
-            nombre_claves(ruc.ruc, periodo.clave, tipo),
+            nombre_claves(ruc.ruc, periodo.clave, tipo, ambiente=self._ambiente()),
             {
+                "ambiente": self._ambiente(),
                 "ruc": ruc.ruc,
                 "periodo": periodo.clave,
                 "tipo": tipo.value,
                 "tipoEtiqueta": tipo.etiqueta,
+                "archivo": clave_txt.rsplit("/", 1)[-1],
                 "total": len(claves),
                 "clavesAcceso": list(claves),
             },
@@ -296,8 +299,9 @@ class Robot:
             if resultado.ruc == ruc and resultado.periodo.clave == periodo.clave
         ]
         self._almacenamiento.guardar_json(
-            nombre_manifiesto(ruc, periodo.clave),
+            nombre_manifiesto(ruc, periodo.clave, ambiente=self._ambiente()),
             {
+                "ambiente": self._ambiente(),
                 "ruc": ruc,
                 "periodo": periodo.clave,
                 "generadoEn": _ahora(),
@@ -305,6 +309,10 @@ class Robot:
                 "totalClaves": sum(descarga["totalClaves"] for descarga in descargas),
             },
         )
+
+    def _ambiente(self) -> str:
+        """Ambiente de los datos (dev, test o produccion)."""
+        return self._configuracion.storage.ambiente
 
     def _url_entrada(self) -> str:
         """URL por la que se inicia la navegación al portal.
