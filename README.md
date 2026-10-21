@@ -127,18 +127,29 @@ manifiesto JSON de claves).
 
 ### 1. Requisitos
 
-- Python 3.12 o superior. Compruebe con `python3 --version`; si es anterior,
-  use el binario nuevo (`python3.13`, `python3.12`, …).
+- Python 3.12 o superior. En macOS `python3` puede ser 3.11: compruebe con
+  `python3 --version` y use el binario nuevo (`python3.13`, `python3.12`, …)
+  si hace falta.
 - Google Chrome instalado (solo para el perfil dedicado; el modo clásico usa
   el Chromium de Playwright).
 - anti-captcha es **opcional**: hoy el portal rechaza sus tokens, así que el
   robot funciona sin cuenta.
 
+La forma corta elige sola un Python válido y recrea el entorno limpio:
+
 ```bash
 cd sri-txt-robot
-python3 -m venv .venv          # use un Python >= 3.12
+bash scripts/instalar.sh
 source .venv/bin/activate
-pip install -e ".[dev]"
+```
+
+Equivalente a mano (note el `python -m pip`, no `pip` a secas):
+
+```bash
+python3.13 -m venv --clear .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
 ```
 
 Si va a usar el modo clásico (sin perfil dedicado), instale además el
@@ -147,6 +158,13 @@ navegador de Playwright:
 ```bash
 playwright install chromium
 ```
+
+> **Si `pip install` se queda minutos en `Using cached …`**: está corriendo un
+> `pip` de otro Python. Pasa cuando se ejecuta `python3 -m venv .venv` sobre un
+> entorno ya creado con 3.13 (`venv` no borra): quedan `lib/python3.11` y un
+> `pip` con shebang al 3.11, que resuelve un proyecto `>=3.12` y hace
+> *backtracking* sin fin. Compruébelo con `python -m pip --version` y recree el
+> entorno con `bash scripts/instalar.sh`.
 
 ### 2. Configuración (opcional)
 

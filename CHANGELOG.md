@@ -19,6 +19,9 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   descargas son automáticas.
 - Comando `sri-txt-robot calentar`: abre el perfil dedicado, espera la consulta
   manual y lo deja habilitado.
+- **`scripts/instalar.sh`**: elige un Python ≥ 3.12, recrea `.venv` con
+  `--clear` e instala con `python -m pip`, de modo que no se mezclen
+  intérpretes.
 - Descarga de **varios períodos en una sola ejecución**: `-p` es repetible
   (`-p 2026-07 -p 2026-08 -p 2026-09`) y también acepta listas separadas por
   comas. El evento de Lambda acepta `periodos` (y mantiene `periodo`).
@@ -34,6 +37,11 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   no por la espera del clic.
 - La guía de instalación usaba `python3.12`, que no existe en todas las macOS;
   ahora indica cualquier intérprete ≥ 3.12 y el uso real sin editar el YAML.
+- `pip install -e ".[dev]"` podía tardar minutos en `Using cached …`: un
+  `.venv` creado primero con 3.13 y luego con `python3` (3.11) conserva el
+  `lib/python3.11` y un `pip` con shebang al intérprete viejo, que resuelve
+  para 3.11 un proyecto `>=3.12` y entra en backtracking sobre `ruff`. Ahora
+  la instalación recrea el entorno y el README explica el síntoma.
 - El portal no responde a Chromium cuando se identifica como headless ni cuando
   negocia HTTP/2: se fija un User-Agent de Chrome de escritorio y
   `--disable-http2`. Sin esto todas las ejecuciones acababan en
