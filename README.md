@@ -59,13 +59,13 @@ acuerde" es tarde.
 
 ## Decisiones de diseño
 
-### Lenguaje: Python 3.12 + Playwright
+### Lenguaje: Python 3.12+ + Playwright
 
 | Alternativa | Por qué no |
 | --- | --- |
 | **PHP** (extensión del paquete) | No hay un controlador de navegador headless en PHP con la madurez de Playwright: `chrome-php/chrome` habla CDP a pelo y Symfony Panther arrastra Symfony. Además, atar el paquete a la UI del portal contradice el ADR 0003. |
 | Node / TypeScript | Válido (Playwright es TS-first), pero Python tiene SDK oficial de anti-captcha, mejor tooling de datos para el parseo del TXT y `httpx`/`pydantic` más sobrios para un servicio de esta forma. |
-| **Python 3.12 + Playwright** ✅ | Playwright resuelve los problemas reales de una app JSF: estado de vista, sesión y descarga de archivos. Auto-espera, sin *sleeps*. El SDK oficial de anti-captcha. Y `boto3`/`httpx`/`pydantic` cubren el resto sin tirar de frameworks. |
+| **Python 3.12+ + Playwright** ✅ | Playwright resuelve los problemas reales de una app JSF: estado de vista, sesión y descarga de archivos. Auto-espera, sin *sleeps*. El SDK oficial de anti-captcha. Y `boto3`/`httpx`/`pydantic` cubren el resto sin tirar de frameworks. |
 
 El paquete PHP **no se toca** para esto: sigue siendo la capa de integración
 con los WSDL oficiales. La frontera entre ambos es un archivo (el TXT o su
@@ -78,7 +78,7 @@ manifiesto JSON de claves).
   una instancia EC2 siempre encendida.
 - Playwright necesita Chromium (~150 MB) y sus dependencias de sistema → **imagen
   de contenedor**, no un ZIP. La imagen se construye sobre
-  `public.ecr.aws/lambda/python:3.12` (Amazon Linux 2023, glibc 2.35) con las
+  `public.ecr.aws/lambda/python:3.14` (Amazon Linux 2023, glibc 2.35) con las
   dependencias de sistema instaladas explícitamente con `dnf` y el navegador
   descargado con `playwright install chromium`. Dos trampas: la base de Lambda
   usa `dnf` y **no** `apt-get`, así que `playwright install --with-deps` falla;
