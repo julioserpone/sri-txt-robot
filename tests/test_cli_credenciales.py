@@ -94,3 +94,32 @@ def test_pedir_password_sin_terminal_falla(monkeypatch: pytest.MonkeyPatch) -> N
 
     with pytest.raises(typer.BadParameter):
         _pedir_password("1758871873001", None)
+
+
+def test_el_ambiente_se_pasa_por_el_comando(tmp_path: Path) -> None:
+    configuracion = _configuracion_para(
+        _sin_archivo(tmp_path),
+        ruc="1758871873001",
+        password="clave",
+        api_key=None,
+        perfil=None,
+        salida=None,
+        ambiente="Test",
+        visible=False,
+    )
+
+    assert configuracion.storage.ambiente == "test"
+
+
+def test_un_ambiente_invalido_se_rechaza(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Ambiente inválido"):
+        _configuracion_para(
+            _sin_archivo(tmp_path),
+            ruc="1758871873001",
+            password="clave",
+            api_key=None,
+            perfil=None,
+            salida=None,
+            ambiente="con espacios",
+            visible=False,
+        )

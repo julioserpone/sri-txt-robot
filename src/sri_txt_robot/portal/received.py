@@ -25,11 +25,11 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from playwright.sync_api import Download, Locator, Page, Request, Response
+from playwright.sync_api import Download, Locator, Page, Response
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from ..captcha.anticaptcha import AntiCaptchaClient, SolucionCaptcha
@@ -54,8 +54,15 @@ _TEXTO_CAPTCHA = "captcha"
 #: Detecta un envío de consulta que lleva token de reCAPTCHA.
 _PATRON_TOKEN_ENVIO = re.compile(r"g-recaptcha-response(?:-\d+)?=(?!&)([^&]{20,})")
 
-#: Segundos que se espera la respuesta de una consulta válida.
-_ESPERA_RESPUESTA_MS = 30_000
+#: Tiempo máximo para ver el envío con token (el portal lo hace en ~250 ms).
+_ESPERA_RESPUESTA_MS = 20_000
+
+#: Tiempo máximo para que el portal pinte el resultado de la consulta.
+_ESPERA_RESULTADO_MS = 15_000
+
+#: Margen en el que se ignora un aviso de captcha: el primer envío del portal
+#: va sin token y siempre se rechaza; el bueno llega unos 250 ms después.
+_GRACIA_CAPTCHA_MS = 1_500
 
 
 class ConsultaSRIError(RuntimeError):
@@ -257,44 +264,82 @@ def consultar_y_descargar(
 
 
 def _pulsar_consultar(page: Page, selectores: Selectores) -> str:
-    """Pulsa "Consultar" y espera la respuesta que lleva token de reCAPTCHA."""
+    """Pulsa "Consultar" y espera la respuesta de la consulta con token.
+
+    El portal hace dos envíos: uno inmediato **sin** token (que rechaza) y otro
+    unos 250 ms después con el token de reCAPTCHA. Se espera la respuesta del
+    segundo con ``expect_response``, que además bombea los eventos de Playwright;
+    un bucle con ``time.sleep`` no los entregaría y habría que agotar el tiempo
+    de espera en cada consulta.
+    """
     boton = primer_visible(page, selectores.grupo("consulta", "consultar"), timeout_ms=10_000)
     if boton is None:
         return ""
-    with _CapturarConsultasValidas(page) as capturadas:
-        try:
-            boton.click(timeout=20_000)
-        except PlaywrightTimeoutError as error:
-            raise ConsultaSRIError("El botón 'Consultar' no respondió.") from error
-        _esperar_a(lambda: bool(capturadas), _ESPERA_RESPUESTA_MS)
-    return "boton" if capturadas else ""
+
+    try:
+        with page.expect_response(_es_consulta_con_token, timeout=_ESPERA_RESPUESTA_MS):
+            try:
+                boton.click(timeout=20_000)
+            except PlaywrightTimeoutError as error:
+                raise ConsultaSRIError("El botón 'Consultar' no respondió.") from error
+    except PlaywrightTimeoutError:
+        logger.warning("no se observó el envío de la consulta con token de reCAPTCHA")
+        return ""
+
+    return "boton"
+
+
+def _clasificar_mensaje(texto: str) -> str:
+    """Traduce el aviso del portal a un estado del flujo."""
+    if any(fragmento in texto for fragmento in _TEXTO_SIN_DATOS):
+        return "sin_datos"
+    if any(fragmento in texto for fragmento in _TEXTO_CAPTCHA):
+        return "captcha"
+    if texto:
+        logger.warning("aviso no reconocido del portal", extra={"texto": texto[:300]})
+        return "error_formulario" if "ruc" in texto or "parámetro" in texto else "error"
+    return ""
 
 
 def _esperar_resultado(page: Page, selectores: Selectores) -> str:
     """Clasifica el desenlace de la consulta leyendo la pantalla.
 
     Devuelve ``"ok"``, ``"sin_datos"``, ``"captcha"``, ``"error_formulario"`` o
-    ``"error"``.
+    ``"error"``. Sondea cada 100 ms con ``page.wait_for_timeout`` (necesario
+    para que Playwright procese los eventos) y exige que un aviso se repita
+    antes de darlo por definitivo.
     """
-    # La respuesta ya llegó; se deja que PrimeFaces pinte el panel.
-    page.wait_for_timeout(1_200)
+    inicio = time.monotonic()
+    candidato = ""
+    repeticiones = 0
 
-    if _tabla_con_filas(page, selectores):
-        return "ok"
+    while True:
+        if _tabla_con_filas(page, selectores):
+            return "ok"
 
-    texto = _texto_mensajes(page, selectores)
+        transcurrido_ms = (time.monotonic() - inicio) * 1000
+        estado = _clasificar_mensaje(_texto_mensajes(page, selectores))
 
-    if any(fragmento in texto for fragmento in _TEXTO_SIN_DATOS):
-        return "sin_datos"
+        # El primer envío (sin token) siempre muestra "captcha incorrecta"
+        # mientras el navegador resuelve el reCAPTCHA y reenvía la consulta.
+        if estado == "captcha" and transcurrido_ms < _GRACIA_CAPTCHA_MS:
+            estado = ""
 
-    if any(fragmento in texto for fragmento in _TEXTO_CAPTCHA):
-        return "captcha"
+        if estado:
+            repeticiones = repeticiones + 1 if estado == candidato else 1
+            candidato = estado
+            if repeticiones >= 2:
+                return estado
+        else:
+            candidato = ""
+            repeticiones = 0
 
-    if texto:
-        logger.warning("aviso no reconocido del portal", extra={"texto": texto[:300]})
-        return "error_formulario" if "ruc" in texto or "parámetro" in texto else "error"
+        if transcurrido_ms >= _ESPERA_RESULTADO_MS:
+            break
 
-    return "error"
+        page.wait_for_timeout(100)
+
+    return candidato or "error"
 
 
 def _tabla_con_filas(page: Page, selectores: Selectores) -> bool:
@@ -325,8 +370,9 @@ def _texto_mensajes(page: Page, selectores: Selectores) -> str:
     return " ".join(fragmentos).strip().lower()
 
 
-def _es_consulta_con_token(request: Request) -> bool:
-    """Indica si la petición es una consulta que lleva token de reCAPTCHA."""
+def _es_consulta_con_token(respuesta: Response) -> bool:
+    """Indica si la respuesta corresponde a una consulta con token de reCAPTCHA."""
+    request = respuesta.request
     if request.method != "POST" or "comprobantesRecibidos.jsf" not in request.url:
         return False
     try:
@@ -334,38 +380,6 @@ def _es_consulta_con_token(request: Request) -> bool:
     except Exception:  # noqa: BLE001
         return False
     return bool(_PATRON_TOKEN_ENVIO.search(datos))
-
-
-class _CapturarConsultasValidas:
-    """Contexto que acumula las respuestas de consultas con token."""
-
-    def __init__(self, page: Page) -> None:
-        self._page = page
-        self.respuestas: list[Response] = []
-
-    def __enter__(self) -> list[Response]:
-        self._page.on("response", self._al_recibir)
-        return self.respuestas
-
-    def __exit__(self, *_excepcion: object) -> None:
-        try:
-            self._page.remove_listener("response", self._al_recibir)
-        except Exception:  # noqa: BLE001
-            logger.debug("no se pudo quitar el escucha de respuestas", exc_info=True)
-
-    def _al_recibir(self, respuesta: Response) -> None:
-        if _es_consulta_con_token(respuesta.request):
-            self.respuestas.append(respuesta)
-
-
-def _esperar_a(condicion: Callable[[], bool], timeout_ms: int) -> bool:
-    """Espera a que una condición sea verdadera, sondeando cada 250 ms."""
-    limite = time.monotonic() + timeout_ms / 1000
-    while time.monotonic() < limite:
-        if condicion():
-            return True
-        time.sleep(0.25)
-    return False
 
 
 def _esperar_formulario(page: Page, selectores: Selectores) -> None:
@@ -377,7 +391,7 @@ def _esperar_formulario(page: Page, selectores: Selectores) -> None:
             "(no aparece el filtro de año). Puede que la sesión haya caducado."
         )
     try:
-        page.wait_for_load_state("networkidle", timeout=20_000)
+        page.wait_for_load_state("networkidle", timeout=8_000)
     except PlaywrightTimeoutError:
         logger.debug("networkidle no alcanzado", extra={"url": page.url})
 
@@ -410,25 +424,53 @@ def _seleccionar(
         logger.debug("campo opcional ausente", extra={"campo": clave})
         return
 
-    for opcion in opciones:
+    valor = _opcion_disponible(campo, opciones)
+    if valor is not None:
         try:
-            campo.select_option(value=opcion, timeout=5_000)
-            logger.debug("opción seleccionada por valor", extra={"campo": clave, "opcion": opcion})
+            campo.select_option(value=valor, timeout=5_000)
+            logger.debug("opción seleccionada", extra={"campo": clave, "valor": valor})
             return
-        except Exception:  # noqa: BLE001 - se intenta la siguiente alternativa
-            continue
-
-    for opcion in opciones:
-        try:
-            campo.select_option(label=opcion, timeout=5_000)
-            logger.debug("opción seleccionada por etiqueta", extra={"campo": clave, "opcion": opcion})
-            return
-        except Exception:  # noqa: BLE001
-            continue
+        except PlaywrightTimeoutError:
+            logger.debug("la opción localizada no se pudo seleccionar", extra={"campo": clave})
 
     if obligatorio:
         raise ConsultaSRIError(f"No se pudo seleccionar ninguna de las opciones {opciones!r} en el campo '{clave}'.")
     logger.warning("no se pudo seleccionar la opción del campo opcional", extra={"campo": clave})
+
+
+def _opcion_disponible(campo: Locator, opciones: list[str]) -> str | None:
+    """Devuelve el ``value`` de la primera opción del desplegable que coincida.
+
+    Leer las opciones una sola vez evita que ``select_option`` espere 5 s por
+    cada alternativa que no existe, que es lo que hacía lenta la consulta en
+    los meses y tipos con valores distintos a los esperados.
+    """
+    try:
+        disponibles: list[list[str]] = campo.evaluate(
+            "el => Array.from(el.options).map(o => [o.value, (o.textContent || '').trim()])"
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("no se pudieron leer las opciones del campo", exc_info=True)
+        return None
+
+    for valor, _etiqueta in disponibles:
+        if valor and valor in opciones:
+            return valor
+
+    buscadas = {_normalizar(opcion) for opcion in opciones if opcion}
+    for valor, etiqueta in disponibles:
+        if _normalizar(etiqueta) in buscadas or (valor and _normalizar(valor) in buscadas):
+            return valor
+
+    return None
+
+
+def _normalizar(texto: str) -> str:
+    """Minúsculas, sin acentos y con espacios simples, para comparar etiquetas."""
+    sin_acentos = "".join(
+        caracter for caracter in unicodedata.normalize("NFKD", texto) if not unicodedata.combining(caracter)
+    )
+    return " ".join(sin_acentos.lower().split())
 
 
 def _descargar(page: Page, selectores: Selectores, directorio: Path) -> tuple[bytes, str]:

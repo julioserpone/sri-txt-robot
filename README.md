@@ -77,15 +77,18 @@ manifiesto JSON de claves).
   perfil. 12 invocaciones al año cuestan céntimos, frente a ~USD 15-20/mes de
   una instancia EC2 siempre encendida.
 - Playwright necesita Chromium (~150 MB) y sus dependencias de sistema → **imagen
-  de contenedor**, no un ZIP. La imagen se construye sobre
-  `public.ecr.aws/lambda/python:3.14` (Amazon Linux 2023, glibc 2.35) con las
-  dependencias de sistema instaladas explícitamente con `dnf` y el navegador
-  descargado con `playwright install chromium`. Dos trampas: la base de Lambda
-  usa `dnf` y **no** `apt-get`, así que `playwright install --with-deps` falla;
-  y la imagen oficial de Playwright está basada en Noble (glibc 2.39), que **no**
-  es compatible con el runtime de Lambda.
-- Se reutiliza el stack que ya usas: SAM (`infra/template.yaml`), Secrets
-  Manager para las claves y S3 para los resultados.
+  de contenedor**, no un ZIP. La imagen parte de
+  `mcr.microsoft.com/playwright/python:v1.64.0-noble`, que ya trae Chromium y
+  sus dependencias, y añade `awslambdaric` como Runtime Interface Client. Al
+  traer su propia userland, la imagen de Playwright es válida en Lambda: la
+  restricción de glibc aplica a los runtimes gestionados y a los paquetes ZIP,
+  no a las imágenes de contenedor.
+- Dentro del contenedor se arranca **Xvfb** y Chrome corre "con ventana": en
+  headless se anuncia como `HeadlessChrome` y el portal no responde.
+- **Sin Secrets Manager**: la clave del portal va en una variable de entorno
+  de la función (cifrada en reposo por Lambda) y los resultados en S3.
+- El despliegue lo hace `scripts/publicar.sh` (bucket, ECR, IAM, Lambda y la
+  regla mensual de EventBridge), no una plantilla SAM.
 - Alternativa si prefieres un servidor: el robot es un CLI (`sri-txt-robot
   descargar`), así que un `cron` en EC2 o un `systemd timer` funcionan igual.
 
@@ -261,6 +264,9 @@ sri-txt-robot descargar \
   --visible \
   -p 2026-07 -p 2026-08 -p 2026-09 -t 01
 
+# Separar los datos por entorno (dev, test, produccion)
+sri-txt-robot descargar --ruc 1758871873001 --ambiente test -p 2026-08
+
 # Con YAML (varios RUC, S3, tipos por defecto)
 sri-txt-robot descargar --config config/robots.yaml
 
@@ -280,71 +286,147 @@ sri-txt-robot periodo
 sri-txt-robot saldo
 
 # Extraer las claves de un TXT ya descargado
-sri-txt-robot claves datos/1790012345001/2026-09/comprobantes-recibidos-01.txt
+sri-txt-robot claves datos/test/1758871873001/2026-09/facturas-recibidas-2026-09.txt
 ```
 
 ### 6. Resultado
 
+Los archivos se guardan con la misma jerarquía en disco y en S3:
+
 ```text
-datos/
-└── 1790012345001/
-    ├── 2026-07/
-    │   ├── comprobantes-recibidos-01.txt
-    │   ├── comprobantes-recibidos-01.claves.json
-    │   └── manifest.json              # solo los tipos de ESE período
-    ├── 2026-08/
-    │   └── ...
-    └── 2026-09/
-        └── ...
+datos/                                   s3://<bucket>/
+└── test/                                └── test/
+    └── 1758871873001/                       └── 1758871873001/
+        └── 2026-08/                             └── 2026-08/
+            ├── facturas-recibidas-2026-08.txt
+            ├── facturas-recibidas-2026-08-claves.json
+            └── manifest.json
 ```
+
+La clave completa es:
+
+```text
+<ambiente>/<ruc>/<periodo>/<tipo>-recibidas-<periodo>.txt
+<ambiente>/<ruc>/<periodo>/<tipo>-recibidas-<periodo>-claves.json
+<ambiente>/<ruc>/<periodo>/manifest.json
+```
+
+| Tipo | Archivo |
+| --- | --- |
+| `01` Factura | `facturas-recibidas-2026-08.txt` |
+| `03` Liquidación de compra | `liquidaciones-compra-recibidas-2026-08.txt` |
+| `04` Nota de crédito | `notas-credito-recibidas-2026-08.txt` |
+| `05` Nota de débito | `notas-debito-recibidas-2026-08.txt` |
+| `07` Retención | `retenciones-recibidas-2026-08.txt` |
+
+El ambiente se elige con `--ambiente` (o `SRI_AMBIENTE`): `dev`, `test` o
+`produccion`. Así los mismos RUC y períodos conviven en un solo bucket sin
+mezclarse.
 
 El `.claves.json` es el contrato de entrada para el paquete PHP:
 
 ```json
 {
-  "ruc": "1790012345001",
-  "periodo": "2026-09",
+  "ambiente": "test",
+  "ruc": "1758871873001",
+  "periodo": "2026-08",
   "tipo": "01",
+  "tipoEtiqueta": "Factura",
+  "archivo": "facturas-recibidas-2026-08.txt",
   "total": 128,
   "clavesAcceso": ["1509202601179001234500120010010000001231234567812"]
 }
+```
+
+Desde PHP, la clave del JSON para un período se arma siempre igual:
+
+```php
+$clave = "produccion/{$ruc}/{$periodo}/facturas-recibidas-{$periodo}-claves.json";
 ```
 
 ---
 
 ## Despliegue en AWS
 
+> **Estado (oct-2026): el empaquetado está validado, el captcha no.**
+> La imagen se construye y el robot se ejecuta dentro del contenedor Linux
+> (Xvfb + Chrome "con ventana"), pero el portal **rechaza el reCAPTCHA** con el
+> perfil calentado en macOS: la confianza parece atada al navegador/sistema
+> donde se calentó. También se probó anti-captcha y el portal rechazó sus
+> tokens. Por eso, hoy, **no se recomienda publicarlo en Lambda**: use el cron
+> local (ver más abajo) o vuelva a calentar el perfil en el sistema de destino
+> y verifique antes.
+
+El robot corre en **Lambda con imagen de contenedor**, guarda los TXT en S3 y se
+dispara con una regla mensual de EventBridge. No usa Secrets Manager: la clave
+del portal se pasa como variable de entorno de la función (cifrada en reposo
+por Lambda) y el resto de la configuración viaja en la imagen.
+
 ```bash
-# 1. Construir y publicar la imagen
-aws ecr create-repository --repository-name sri-txt-robot
-docker build -t sri-txt-robot .
-docker tag sri-txt-robot:latest <cuenta>.dkr.ecr.<region>.amazonaws.com/sri-txt-robot:latest
-docker push <cuenta>.dkr.ecr.<region>.amazonaws.com/sri-txt-robot:latest
-
-# 2. Crear el secreto con las claves del portal
-aws secretsmanager create-secret --name sri/txt-robot/credenciales \
-  --secret-string '{"1790012345001":"clave-del-portal"}'
-
-# 3. Desplegar
-sam build --use-container && sam deploy --guided
+./scripts/publicar.sh \
+  --ruc 1758871873001 \
+  --ambiente produccion \
+  --tipos 01
 ```
 
-La plantilla `infra/template.yaml` crea el bucket, la función, la regla de
-EventBridge, el log group y los permisos de IAM (solo `s3:PutObject` sobre el
-bucket y `secretsmanager:GetSecretValue` sobre el secreto).
+El script pide la clave de forma oculta (o `--password '...'`) y es
+**idempotente**:
+
+1. Comprueba las credenciales de AWS.
+2. Si la función ya existe, muestra su estado y **no cambia nada**; para
+   desplegar una versión nueva hay que añadir `--actualizar`.
+3. Si no existe, crea lo mínimo: bucket S3 (privado, cifrado), repositorio ECR,
+   rol IAM, función Lambda (`arm64`, 2 GB, 900 s) y regla de EventBridge.
+
+Lo que se publica:
+
+- `deploy/build/perfil`: copia del perfil de Chrome calentado (se quitan los
+  `Singleton*` de macOS, que en Linux hacen que Chrome crea que el perfil está
+  en uso).
+- `deploy/build/config/robots.yaml`: RUC y `password_env: SRI_PASSWORD`.
+- Variables de la función: `SRI_PASSWORD`, `SRI_AMBIENTE`, `SRI_BUCKET`.
+
+Frecuencia por defecto: día 5 de cada mes a las 08:00 UTC (03:00 de Ecuador),
+descargando el mes anterior. Se cambia con `--cron`.
 
 ### Invocación manual
 
 ```bash
-aws lambda invoke --function-name sri-txt-robot-prod \
-  --payload '{"periodos":["2026-07","2026-08","2026-09"]}' \
-  --cli-binary-format raw-in-base64-out out.json
+aws lambda invoke --function-name sri-txt-robot \
+  --payload '{"periodos":["2026-07","2026-08"]}' \
+  --cli-binary-format raw-in-base64-out out.json && cat out.json
 ```
 
-El evento acepta `periodos` (lista) o `periodo` (un solo mes, por
-compatibilidad). Sin períodos se usa el mes cerrado anterior.
+El evento acepta `periodos` (lista) o `periodo` (un solo mes). Sin períodos se
+usa el mes cerrado anterior.
 
----
+### Coste
+
+Una ejecución mensual de 2-3 minutos con 2 GB de memoria cuesta menos de un
+centavo; el repositorio ECR (~1,5 GB) ronda los 0,15 USD al mes y S3 unos
+céntimos. En total, por debajo de 0,30 USD al mes para un contribuyente.
+
+### Alternativa probada: tarea programada en el Mac
+
+Mientras el captcha no se pueda resolver fuera del Mac, la forma de automatizar
+sin coste es un **LaunchAgent** (corre en la sesión gráfica del usuario, que es
+lo que Chrome necesita) que ejecute el robot y suba los TXT a S3:
+
+```xml
+<!-- ~/Library/LaunchAgents/com.ejemplo.sri-txt-robot.plist -->
+<key>ProgramArguments</key>
+<array>
+  <string>/bin/zsh</string>
+  <string>-lc</string>
+  <string>cd "$HOME/Projects/sri-txt-robot" &amp;&amp; SRI_BUCKET=mi-bucket SRI_AMBIENTE=produccion .venv/bin/sri-txt-robot descargar --config config/robots.yaml</string>
+</array>
+<key>StartCalendarInterval</key>
+<dict><key>Day</key><integer>5</integer><key>Hour</key><integer>8</integer></dict>
+```
+
+Con `config/robots.yaml` declarando `password_env: SRI_PASSWORD` y la clave en
+el llavero o en un archivo con permisos `600` que se cargue antes de ejecutar.
+Si el Mac está dormido, launchd lo despierta o lo ejecuta al volver.
 
 ## Integración con `sri-comprobantes-php`
 
@@ -359,7 +441,7 @@ use JulioSerpone\SriComprobantes\Service\ConsultaMasivaService;
 use JulioSerpone\SriComprobantes\Storage\FilesystemComprobanteRepository;
 use JulioSerpone\SriComprobantes\Transport\SoapTransport;
 
-$claves = TxtReportParser::extraerClavesAcceso(file_get_contents('/ruta/comprobantes-recibidos-01.txt'));
+$claves = TxtReportParser::extraerClavesAcceso(file_get_contents('/ruta/facturas-recibidas-2026-09.txt'));
 
 $servicio = new ConsultaMasivaService(
     autorizacion: new AutorizacionClient(new SoapTransport($wsdl)),
@@ -393,7 +475,12 @@ src/sri_txt_robot/
 config/
 ├── robots.example.yaml   configuración con los contribuyentes
 └── selectors.yaml        selectores del portal
-infra/template.yaml       plantilla SAM
+deploy/
+├── Dockerfile            imagen base (Playwright + código)
+└── Dockerfile.lambda     imagen final (configuración + perfil calentado)
+scripts/
+├── instalar.sh           crea el entorno local con un Python >= 3.12
+└── publicar.sh           publica en Lambda de forma idempotente
 ```
 
 ## Pruebas
@@ -422,10 +509,11 @@ el comando `calibrar` con un RUC de pruebas.
   publica el formato del TXT.
 - El robot no descarga los XML: eso lo hace el paquete PHP contra la API
   oficial, una clave a la vez.
-- El reCAPTCHA Enterprise necesita un perfil de Chrome **calentado** con una
-  consulta manual (`sri-txt-robot calentar`) y una ventana visible. En AWS
-  Lambda eso implica Xvfb y un perfil ya calentado en la imagen; el perfil
-  puede caducar y entonces hace falta repetir el calentamiento en local.
+- El reCAPTCHA Enterprise está **atado al navegador donde se calentó** el
+  perfil. Medido en oct-2026: el mismo perfil copiado a un contenedor Linux
+  (con Xvfb, Chrome "con ventana" y la misma IP de salida) es rechazado, y
+  anti-captcha tampoco obtiene tokens válidos para este portal. El camino
+  probado es ejecutar el robot en el mismo Mac donde se calentó el perfil.
 
 ## Consideraciones legales
 

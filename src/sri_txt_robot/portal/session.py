@@ -10,10 +10,12 @@ from __future__ import annotations
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
 from types import TracebackType
+from typing import IO
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 
@@ -28,6 +30,14 @@ CHROME_MACOS = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 #: Tiempo máximo de espera a que el Chrome recién lanzado abra el puerto CDP.
 ESPERA_CDP_SEGUNDOS = 40.0
+
+#: User-Agent de escritorio Linux. Chrome en modo headless se anuncia como
+#: "HeadlessChrome" y el portal del SRI deja de responder; en el contenedor se
+#: usa una pantalla virtual (Xvfb) con el navegador "visible", pero este valor
+#: cubre también la ejecución sin DISPLAY.
+USER_AGENT_LINUX = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+)
 
 #: Banderas necesarias para ejecutar Chromium dentro de un contenedor.
 BANDERAS = (
@@ -68,6 +78,7 @@ class Navegador:
         self._contexto: BrowserContext | None = None
         self._guardar_estado = True
         self._proceso: subprocess.Popen[bytes] | None = None
+        self._log_chrome: IO[bytes] | None = None
         self._modo_perfil = bool(configuracion.perfil_dir.strip())
         self.pagina: Page | None = None
 
@@ -139,13 +150,26 @@ class Navegador:
             "about:blank",
         ]
         if sys.platform != "darwin":
-            orden[1:1] = ["--no-sandbox", "--disable-dev-shm-usage"]
+            orden[1:1] = [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-http2",
+                "--disable-gpu",
+            ]
         if self._configuracion.headless and sys.platform != "darwin":
             orden.insert(-1, "--headless=new")
+            orden.insert(-1, f"--user-agent={self._configuracion.user_agent or USER_AGENT_LINUX}")
 
         logger.info("abriendo Chrome con el perfil dedicado", extra={"perfil": str(perfil), "puerto": puerto})
-        self._proceso = subprocess.Popen(orden, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        url_cdp = _esperar_cdp(puerto, self._proceso)
+        self._log_chrome = tempfile.NamedTemporaryFile(  # noqa: SIM115 - se cierra en __exit__
+            prefix="sri-chrome-", suffix=".log", delete=False
+        )
+        self._proceso = subprocess.Popen(orden, stdout=subprocess.DEVNULL, stderr=self._log_chrome)
+        try:
+            url_cdp = _esperar_cdp(puerto, self._proceso, Path(self._log_chrome.name))
+        except RuntimeError:
+            logger.error("Chrome no arrancó; vea %s", self._log_chrome.name)
+            raise
 
         self._browser = self._playwright.chromium.connect_over_cdp(url_cdp)
         contextos = self._browser.contexts
@@ -179,6 +203,10 @@ class Navegador:
         if self._proceso is not None:
             _cerrar_proceso(self._proceso)
             self._proceso = None
+
+        if self._log_chrome is not None:
+            self._log_chrome.close()
+            self._log_chrome = None
 
         if self._playwright is not None:
             self._playwright.stop()
@@ -215,13 +243,14 @@ def _puerto_libre() -> int:
         return int(conexion.getsockname()[1])
 
 
-def _esperar_cdp(puerto: int, proceso: subprocess.Popen[bytes]) -> str:
+def _esperar_cdp(puerto: int, proceso: subprocess.Popen[bytes], registro: Path | None = None) -> str:
     """Espera a que el Chrome lanzado publique el endpoint CDP."""
     url = f"http://127.0.0.1:{puerto}/json/version"
     limite = time.monotonic() + ESPERA_CDP_SEGUNDOS
     while time.monotonic() < limite:
         if proceso.poll() is not None:
-            raise RuntimeError(f"Chrome terminó antes de exponer CDP (código {proceso.returncode}).")
+            detalle = _ultimas_lineas(registro)
+            raise RuntimeError(f"Chrome terminó antes de exponer CDP (código {proceso.returncode}). {detalle}".strip())
         try:
             with urllib.request.urlopen(url, timeout=1) as respuesta:
                 respuesta.read(1)
@@ -229,6 +258,17 @@ def _esperar_cdp(puerto: int, proceso: subprocess.Popen[bytes]) -> str:
         except Exception:  # noqa: BLE001
             time.sleep(0.25)
     raise RuntimeError(f"Chrome no expuso el puerto CDP {puerto} en {ESPERA_CDP_SEGUNDOS:.0f} s.")
+
+
+def _ultimas_lineas(registro: Path | None, limite: int = 500) -> str:
+    """Devuelve el final del registro de Chrome para diagnosticar un fallo."""
+    if registro is None or not registro.is_file():
+        return ""
+    try:
+        texto = registro.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return texto[-limite:].strip()
 
 
 def _cerrar_proceso(proceso: subprocess.Popen[bytes]) -> None:

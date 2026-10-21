@@ -22,6 +22,21 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 - **`scripts/instalar.sh`**: elige un Python ≥ 3.12, recrea `.venv` con
   `--clear` e instala con `python -m pip`, de modo que no se mezclen
   intérpretes.
+- **Datos organizados por ambiente** (`--ambiente`, `SRI_AMBIENTE`): la clave
+  es `{ambiente}/{ruc}/{periodo}/{tipo}-recibidas-{periodo}.txt`, con nombres
+  legibles (`facturas-recibidas-2026-08.txt`,
+  `notas-credito-recibidas-2026-08-claves.json`). El árbol es idéntico en
+  disco y en S3.
+- **`storage.prefix`** queda vacío por defecto y `SRI_BUCKET` permite fijar el
+  bucket en Lambda sin recompilar la imagen.
+- **Despliegue en Lambda sin Secrets Manager**: `scripts/publicar.sh` crea (si
+  faltan) bucket S3, repositorio ECR, rol IAM, función con imagen de contenedor
+  y regla mensual de EventBridge. Es idempotente: si la función ya existe no
+  toca nada salvo `--actualizar`.
+- `deploy/Dockerfile` (Playwright + `awslambdaric`) y
+  `deploy/Dockerfile.lambda` (configuración y perfil calentado).
+- La opción `--selectors` respeta `SRI_ROBOT_SELECTORS`, para que la imagen de
+  Lambda encuentre los selectores en `/opt/config`.
 - Descarga de **varios períodos en una sola ejecución**: `-p` es repetible
   (`-p 2026-07 -p 2026-08 -p 2026-09`) y también acepta listas separadas por
   comas. El evento de Lambda acepta `periodos` (y mantiene `periodo`).
@@ -30,8 +45,29 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 - El robot intenta primero el captcha con el propio navegador y solo recurre a
   anti-captcha si el portal lo rechaza.
 
+### No validado en esta versión
+
+- **Lambda**: la imagen se construye y el robot corre dentro del contenedor
+  (Xvfb + Chrome con ventana), pero el portal rechaza el captcha con el perfil
+  calentado en macOS; anti-captcha tampoco obtiene tokens válidos. El script
+  `scripts/publicar.sh` queda listo y probado en seco, pero no se recomienda
+  publicar hasta resolver el captcha. La alternativa documentada es un
+  LaunchAgent en el Mac que suba los TXT a S3.
+
 ### Corregido
 
+- **La consulta tardaba 30 s de más**: `_esperar_a` usaba `time.sleep`, y en
+  Playwright síncrono eso no bombea eventos, así que el escucha de respuestas
+  nunca veía el envío con token y se agotaba el tiempo en cada tipo. Ahora se
+  usa `expect_response` y el resultado se sondea cada 100 ms: la consulta pasó
+  de ~30 s a ~0,6 s (una ejecución de 2 tipos, de 80 s a 22 s).
+- Elegir opción en los desplegables esperaba 5 s por cada alternativa que no
+  existía; ahora se leen las opciones una vez y se selecciona la que coincide.
+- El perfil de macOS lleva enlaces `SingletonLock/Socket/Cookie` que en Linux
+  hacen que Chrome crea que el perfil está en uso y termine con código 21; la
+  imagen los elimina al copiarlo.
+- En Linux el perfil dedicado se atascaba en HTTP/2 al entrar al portal: se
+  lanza con `--disable-http2`, igual que el modo clásico.
 - El login tolera que Playwright no reciba el evento de navegación tras pulsar
   "Ingresar" (habitual al conectar por CDP): el resultado se decide por la URL,
   no por la espera del clic.

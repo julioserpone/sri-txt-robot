@@ -225,3 +225,66 @@ robots: []
 
     with pytest.raises(ConfigError, match="NO_DEFINIDA"):
         cargar_config(ruta)
+
+
+def test_el_ambiente_por_defecto_es_dev(tmp_path: Path) -> None:
+    ruta = _escribir(
+        tmp_path,
+        """
+version: 1
+storage:
+  local_dir: "./datos"
+robots: []
+""",
+    )
+
+    assert cargar_config(ruta).storage.ambiente == "dev"
+
+
+def test_sri_ambiente_sobrescribe_el_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SRI_AMBIENTE", "Produccion")
+    ruta = _escribir(
+        tmp_path,
+        """
+version: 1
+storage:
+  local_dir: "./datos"
+robots: []
+""",
+    )
+
+    assert cargar_config(ruta).storage.ambiente == "produccion"
+
+
+def test_sri_bucket_fuerza_el_almacenamiento_en_s3(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SRI_BUCKET", "mi-bucket")
+    ruta = _escribir(
+        tmp_path,
+        """
+version: 1
+storage:
+  local_dir: "./datos"
+robots: []
+""",
+    )
+
+    configuracion = cargar_config(ruta)
+
+    assert configuracion.storage.bucket == "mi-bucket"
+    assert configuracion.storage.local_dir == ""
+
+
+def test_un_ambiente_invalido_se_rechaza(tmp_path: Path) -> None:
+    ruta = _escribir(
+        tmp_path,
+        """
+version: 1
+storage:
+  local_dir: "./datos"
+  ambiente: "dos palabras"
+robots: []
+""",
+    )
+
+    with pytest.raises(Exception, match="Ambiente inválido"):
+        cargar_config(ruta)

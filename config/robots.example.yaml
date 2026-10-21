@@ -1,8 +1,8 @@
 # Configuración del robot. Copie este archivo como config/robots.yaml.
 #
 # Los secretos NO se escriben aquí: use variables de entorno (${NOMBRE}) o el
-# nombre de una variable con 'passwordEnv'. En Lambda las credenciales se
-# leen de AWS Secrets Manager y se inyectan como variables de entorno.
+# nombre de una variable con 'password_env'. En Lambda la clave llega en la
+# variable de entorno de la función; no se usa Secrets Manager.
 
 version: 1
 
@@ -65,11 +65,16 @@ portal:
   chrome_path: ""
 
 storage:
-  # Bucket de S3 para los TXT y los manifiestos. Si está vacío se usa
-  # 'local_dir'.
+  # Bucket de S3 para los TXT, las claves y los manifiestos. Si está vacío se
+  # usa 'local_dir'. La variable SRI_BUCKET tiene prioridad sobre este valor.
   bucket: ""
-  prefix: "sri/txt"
+  # Prefijo opcional delante de 'ambiente/ruc/periodo'. En S3 las claves son:
+  #   {prefijo}/{ambiente}/{ruc}/{periodo}/facturas-recibidas-{periodo}.txt
+  prefix: ""
   local_dir: "./datos"
+  # Separa los datos por entorno: dev, test o produccion. La variable
+  # SRI_AMBIENTE tiene prioridad sobre este valor.
+  ambiente: "dev"
 
 robots:
   # Contribuyente con RUC de 13 dígitos: se escribe tal cual en el campo

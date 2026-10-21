@@ -1,11 +1,12 @@
 """Persistencia de los TXT descargados y de sus manifiestos.
 
 Dos implementaciones: disco local (desarrollo y pruebas) y Amazon S3 (producción
-en Lambda). La clave del objeto sigue el patrón::
+en Lambda). La clave la construye :mod:`sri_txt_robot.manifest` y sigue el
+patrón::
 
-    {prefijo}/{ruc}/{periodo}/{tipo}.txt
-    {prefijo}/{ruc}/{periodo}/{tipo}.claves.json
-    {prefijo}/{ruc}/{periodo}/manifest.json
+    {prefijo}/{ambiente}/{ruc}/{periodo}/{tipo}-recibidas-{periodo}.txt
+    {prefijo}/{ambiente}/{ruc}/{periodo}/{tipo}-recibidas-{periodo}-claves.json
+    {prefijo}/{ambiente}/{ruc}/{periodo}/manifest.json
 """
 
 from __future__ import annotations
@@ -71,14 +72,16 @@ class AlmacenamientoLocal:
 class AlmacenamientoS3:
     """Guarda los resultados en un bucket de Amazon S3."""
 
-    def __init__(self, bucket: str, prefix: str = "") -> None:
-        import boto3  # Importación diferida: solo se necesita en AWS.
-
+    def __init__(self, bucket: str, prefix: str = "", cliente: Any | None = None) -> None:
         if not bucket:
             raise ValueError("El bucket de S3 es obligatorio.")
         self._bucket = bucket
         self._prefix = prefix.strip("/")
-        self._cliente = boto3.client("s3")
+        if cliente is None:
+            import boto3  # Importación diferida: solo se necesita en AWS.
+
+            cliente = boto3.client("s3")
+        self._cliente = cliente
 
     def guardar_txt(self, clave: str, contenido: bytes) -> str:
         destino = self._destino(clave)

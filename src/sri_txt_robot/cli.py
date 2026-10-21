@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import date
@@ -14,7 +15,7 @@ from pydantic import SecretStr
 
 from .captcha.anticaptcha import AntiCaptchaClient
 from .captcha.inject import detectar_accion, detectar_sitekey, es_enterprise, es_invisible
-from .config import ConfigError, RobotConfig, RobotEntry, cargar_config
+from .config import ConfigError, RobotConfig, RobotEntry, cargar_config, validar_ambiente
 from .logging import configurar_logging, obtener_logger
 from .manifest import extraer_claves
 from .models import Periodo, TipoComprobante
@@ -50,9 +51,9 @@ def descargar(
         ),
     ] = Path(CONFIG_POR_DEFECTO),
     selectores: Annotated[
-        Path,
+        Path | None,
         typer.Option("--selectors", "-s", help="Archivo YAML de selectores."),
-    ] = Path(SELECTORES_POR_DEFECTO),
+    ] = None,
     periodos: Annotated[
         list[str] | None,
         typer.Option(
@@ -88,6 +89,10 @@ def descargar(
         str | None,
         typer.Option("--salida", help="Carpeta donde guardar los TXT (por defecto ./datos)."),
     ] = None,
+    ambiente: Annotated[
+        str | None,
+        typer.Option("--ambiente", help="Entorno de los datos: dev, test o produccion."),
+    ] = None,
     visible: Annotated[
         bool,
         typer.Option("--visible", help="Muestra la ventana de Chrome (necesario para el captcha)."),
@@ -112,9 +117,10 @@ def descargar(
         api_key=api_key,
         perfil=perfil,
         salida=salida,
+        ambiente=ambiente,
         visible=visible,
     )
-    catalogo = _cargar_selectores(selectores)
+    catalogo = _cargar_selectores(_ruta_selectores(selectores))
 
     periodos_objetivo = _resolver_periodos(periodos)
     tipos_objetivo = tuple(TipoComprobante.desde_codigo(codigo) for codigo in (tipos or []))
@@ -168,9 +174,9 @@ def calentar(
         typer.Option("--config", "-c", help="Archivo YAML de configuración."),
     ] = Path(CONFIG_POR_DEFECTO),
     selectores: Annotated[
-        Path,
+        Path | None,
         typer.Option("--selectors", "-s", help="Archivo YAML de selectores."),
-    ] = Path(SELECTORES_POR_DEFECTO),
+    ] = None,
     ruc: Annotated[
         str | None,
         typer.Option("--ruc", "-r", help="RUC (13 dígitos) o cédula (10) del contribuyente."),
@@ -208,9 +214,10 @@ def calentar(
         api_key=api_key,
         perfil=perfil,
         salida=None,
+        ambiente=None,
         visible=True,
     )
-    catalogo = _cargar_selectores(selectores)
+    catalogo = _cargar_selectores(_ruta_selectores(selectores))
 
     if not configuracion.portal.perfil_dir.strip():
         typer.secho(
@@ -304,9 +311,9 @@ def calibrar(
         typer.Option("--config", "-c", help="Archivo YAML de configuración."),
     ] = Path(CONFIG_POR_DEFECTO),
     selectores: Annotated[
-        Path,
+        Path | None,
         typer.Option("--selectors", "-s", help="Archivo YAML de selectores."),
-    ] = Path(SELECTORES_POR_DEFECTO),
+    ] = None,
     ruc: Annotated[
         str | None,
         typer.Option("--ruc", "-r", help="RUC a usar para la calibración."),
@@ -324,7 +331,7 @@ def calibrar(
     """
     configurar_logging()
     configuracion = _cargar(config)
-    catalogo = _cargar_selectores(selectores)
+    catalogo = _cargar_selectores(_ruta_selectores(selectores))
 
     rucs = configuracion.rucs_activos()
     if ruc:
@@ -420,6 +427,13 @@ def _cargar(ruta: Path) -> RobotConfig:
         raise typer.Exit(code=2) from error
 
 
+def _ruta_selectores(ruta: Path | None) -> Path:
+    """Devuelve el archivo de selectores, respetando SRI_ROBOT_SELECTORS."""
+    if ruta is not None:
+        return ruta
+    return Path(os.environ.get("SRI_ROBOT_SELECTORS", SELECTORES_POR_DEFECTO))
+
+
 def _pedir_password(ruc: str | None, password: str | None) -> str | None:
     """Devuelve la clave del portal; si hace falta, la pregunta sin mostrarla."""
     if password or not ruc:
@@ -438,7 +452,8 @@ def _construir_configuracion(
     api_key: str | None,
     perfil: str | None,
     salida: str | None,
-    visible: bool,
+    ambiente: str | None = None,
+    visible: bool = False,
 ) -> RobotConfig:
     """Combina el YAML (si existe) con lo que venga en la línea de comandos.
 
@@ -453,9 +468,10 @@ def _construir_configuracion(
             api_key=api_key,
             perfil=perfil,
             salida=salida,
+            ambiente=ambiente,
             visible=visible,
         )
-    except ConfigError as error:
+    except (ConfigError, ValueError) as error:
         typer.secho(f"Error de configuración: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from error
 
@@ -468,7 +484,8 @@ def _configuracion_para(
     api_key: str | None,
     perfil: str | None,
     salida: str | None,
-    visible: bool,
+    ambiente: str | None = None,
+    visible: bool = False,
 ) -> RobotConfig:
     base = _cargar(ruta) if ruta.is_file() else RobotConfig()
 
@@ -483,6 +500,8 @@ def _configuracion_para(
         captcha = captcha.model_copy(update={"api_key": SecretStr(api_key)})
 
     storage = base.storage
+    if ambiente:
+        storage = storage.model_copy(update={"ambiente": validar_ambiente(ambiente)})
     if salida:
         storage = storage.model_copy(update={"local_dir": salida})
     elif not storage.bucket and not storage.local_dir:

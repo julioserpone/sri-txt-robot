@@ -27,3 +27,6 @@ diagnostico/
 .DS_Store
 .idea/
 .vscode/
+
+# Contexto de compilación de la imagen de Lambda (perfil y configuración)
+deploy/build/
