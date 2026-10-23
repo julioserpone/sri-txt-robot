@@ -52,7 +52,8 @@ Por eso `period.py` no bloquea períodos antiguos; solo valida que el año exist
 en el desplegable (`2022`–`2026` en la última revisión) y sugiere el mes cerrado
 anterior cuando no se indica ninguno.
 
-El trabajo sigue siendo mensual (EventBridge), pero ya no es obligatorio
+El trabajo suele ser mensual (EventBridge en el modo estático; en el modo
+dinámico lo agenda la aplicación que invoca), pero ya no es obligatorio
 ejecutarlo en los primeros días del mes: sirve también para recuperar históricos.
 
 ---
@@ -83,12 +84,17 @@ manifiesto JSON de claves).
   traer su propia userland, la imagen de Playwright es válida en Lambda: la
   restricción de glibc aplica a los runtimes gestionados y a los paquetes ZIP,
   no a las imágenes de contenedor.
-- Dentro del contenedor se arranca **Xvfb** y Chrome corre "con ventana": en
-  headless se anuncia como `HeadlessChrome` y el portal no responde.
-- **Sin Secrets Manager**: la clave del portal va en una variable de entorno
-  de la función (cifrada en reposo por Lambda) y los resultados en S3.
-- El despliegue lo hace `scripts/publicar.sh` (bucket, ECR, IAM, Lambda y la
-  regla mensual de EventBridge), no una plantilla SAM.
+- Dentro del contenedor se arranca **Xvfb** de forma perezosa, justo antes de
+  abrir Chrome, y este corre "con ventana": en headless se anuncia como
+  `HeadlessChrome` y el portal no responde.
+- **Credenciales sin Secrets Manager**: en el modo estático la clave del portal
+  va en una variable de entorno de la función (cifrada en reposo por Lambda).
+  En el modo dinámico cada invocación trae un sobre `sealed_credentials`
+  cifrado con la clave pública del robot; la Lambda solo guarda la clave
+  privada. Los resultados van a S3.
+- El despliegue lo hace `scripts/publicar.sh` (bucket, ECR, IAM, Lambda y,
+  solo en el modo estático, la regla mensual de EventBridge), no una plantilla
+  SAM.
 - Alternativa si prefieres un servidor: el robot es un CLI (`sri-txt-robot
   descargar`), así que un `cron` en EC2 o un `systemd timer` funcionan igual.
 
@@ -183,6 +189,10 @@ En ese caso, `captcha.api_key` es la **clave** de anti-captcha y
 `captcha.api_key_env` es el **nombre de la variable de entorno** que la
 contiene; no mezcle ambos. `robots[].password_env` también espera un nombre de
 variable, no la clave.
+
+El RUC puede ser la **cédula de 10 dígitos**: el robot la completa con `001`
+para el login y acepta tanto la cédula como el RUC de 13 dígitos en el filtro
+de consulta del portal.
 
 ### 3. Calentar el perfil de Chrome
 
@@ -287,6 +297,15 @@ sri-txt-robot saldo
 
 # Extraer las claves de un TXT ya descargado
 sri-txt-robot claves datos/test/1758871873001/2026-09/facturas-recibidas-2026-09.txt
+
+# Generar el par de claves para credenciales selladas (una sola vez)
+sri-txt-robot generar-claves \
+  --publica ~/.sri-txt-robot/publica.b64 \
+  --privada ~/.sri-txt-robot/privada.b64
+
+# Generar el sobre que va en sealed_credentials (pregunta la clave oculta)
+sri-txt-robot sellar-credenciales \
+  --ruc 1758871873001 --public-key ~/.sri-txt-robot/publica.b64
 ```
 
 ### 6. Resultado
@@ -355,10 +374,17 @@ $clave = "produccion/{$ruc}/{$periodo}/facturas-recibidas-{$periodo}-claves.json
 > transfiere la confianza) y en lanzar Chrome con `--no-zygote`, porque el
 > sandbox de Lambda no permite el `fork` del zygote.
 
-El robot corre en **Lambda con imagen de contenedor**, guarda los TXT en S3 y se
-dispara con una regla mensual de EventBridge. No usa Secrets Manager: la clave
-del portal se pasa como variable de entorno de la función (cifrada en reposo
-por Lambda) y el resto de la configuración viaja en la imagen.
+El robot corre en **Lambda con imagen de contenedor**, guarda los TXT en S3 y
+tiene dos modos de credenciales:
+
+- **Estático:** un RUC fijo en la imagen y `SRI_PASSWORD` en la función. La
+  regla mensual de EventBridge lo ejecuta.
+- **Dinámico:** `robots: []`, sin `SRI_PASSWORD`; cada invocación trae el RUC y
+  la clave cifrados en `sealed_credentials`. Sirve para varios RUC sin
+  recompilar y sin Secrets Manager. No se crea la regla mensual: EventBridge no
+  puede generar sobres, así que la aplicación que invoca decide cuándo.
+
+### Modo estático
 
 ```bash
 ./scripts/publicar.sh \
@@ -382,6 +408,110 @@ Lo que se publica:
   `Singleton*`, que en Linux hacen que Chrome crea que el perfil está en uso).
 - `deploy/build/config/robots.yaml`: RUC y `password_env: SRI_PASSWORD`.
 - Variables de la función: `SRI_PASSWORD`, `SRI_AMBIENTE`, `SRI_BUCKET`.
+
+### Credenciales selladas por invocación
+
+Este modo permite atender **varios RUC con una sola Lambda** sin recompilar la
+imagen y sin guardar la contraseña del portal en la función. Cada invocación
+lleva un RUC (puede incluir varios `periodos`); para varios contribuyentes, la
+aplicación sella e invoca una vez por RUC. La aplicación que invoca cifra un
+pequeño JSON con la clave **pública** del robot usando
+`sodium_crypto_box_seal`; la Lambda lo abre con su clave **privada**.
+
+Genere el par una sola vez y guarde la clave privada fuera del repositorio:
+
+```bash
+sri-txt-robot generar-claves \
+  --publica ~/.sri-txt-robot/publica.b64 \
+  --privada ~/.sri-txt-robot/privada.b64
+```
+
+- `SRI_ROBOT_PUBLIC_KEY`: clave pública en la aplicación que invoca (por
+  ejemplo `autotributo`). Puede compartirse.
+- `SRI_CREDENTIALS_PRIVATE_KEY`: clave privada en la Lambda. No la versiones,
+  no la pases por argumentos si puedes usar un archivo y no la registres.
+
+Despliegue dinámico:
+
+```bash
+./scripts/publicar.sh --dinamico \
+  --private-key-file ~/.sri-txt-robot/privada.b64 \
+  --perfil ~/.sri-txt-robot/perfil-linux \
+  --ambiente produccion \
+  --actualizar
+```
+
+El script genera `robots: []`, configura solo `SRI_CREDENTIALS_PRIVATE_KEY`,
+`SRI_AMBIENTE` y `SRI_BUCKET`, no crea la regla mensual (y deshabilita una
+existente) y borra el JSON temporal con la clave privada. Si el perfil no se
+pasa, usa `~/.sri-txt-robot/perfil` como antes.
+
+El script usa `us-east-1` por defecto. Si la función ya está en otra región,
+agregue `--region us-east-2` (o la que corresponda). Si sus credenciales están
+en un perfil distinto de `default`, exporte `AWS_PROFILE=...` antes de ejecutar.
+
+El evento tiene este contrato:
+
+```json
+{
+  "periodo": "2026-09",
+  "ruc": "1758871873001",
+  "tipos": ["01", "07"],
+  "sealed_credentials": "<base64 del sobre>"
+}
+```
+
+El contenido en claro del sobre es:
+
+```json
+{
+  "ruc": "1758871873001",
+  "password": "clave del portal",
+  "claveAdicional": "",
+  "iat": 1760000000
+}
+```
+
+`ruc` se repite dentro del sobre para detectar eventos mezclados: si el evento
+trae un `ruc` exterior, debe coincidir con el interior; si se omite, se usa el
+del sobre. El `ruc` exterior, cuando existe, es el que filtra la ejecución.
+`claveAdicional` e `iat` son opcionales; `iat` es la marca UNIX de cuando se
+selló.
+
+Desde PHP el sobre se genera así:
+
+```php
+$contenido = json_encode([
+    'ruc' => $ruc,
+    'password' => $password,
+    'claveAdicional' => $claveAdicional,
+    'iat' => time(),
+], JSON_UNESCAPED_UNICODE);
+
+$sealed = base64_encode(
+    sodium_crypto_box_seal($contenido, base64_decode($publicKey, true))
+);
+```
+
+Si el sobre incluye `iat`, la Lambda acepta una antigüedad de hasta 24 horas
+por defecto, para cubrir los reintentos asíncronos. Se cambia con
+`SRI_CREDENTIALS_MAX_AGE_SECONDS` (segundos); `0` desactiva la comprobación y
+un sobre sin `iat` tampoco caduca. Durante una rotación de claves puede
+mantener la anterior en `SRI_CREDENTIALS_PRIVATE_KEY_ANTERIOR`: el robot prueba
+primero la actual y luego la anterior.
+
+Para probar el sobre sin invocar el portal:
+
+```bash
+sri-txt-robot sellar-credenciales \
+  --ruc 1758871873001 \
+  --public-key ~/.sri-txt-robot/publica.b64
+```
+
+El comando pide la contraseña de forma oculta y escribe el base64 que va en
+`sealed_credentials`. No registre el evento completo: contiene la contraseña
+cifrada y el sobre podría reutilizarse mientras no caduque.
+
 
 ### Calentar el perfil dentro de Linux
 
@@ -418,21 +548,40 @@ tras muchos meses o un cambio de infraestructura). Guarde el perfil fuera del
 repositorio (por ejemplo `~/.sri-txt-robot/perfil-linux`) y pase esa ruta a
 `--perfil`; contiene cookies de sesión y no debe versionarse.
 
-Dos detalles del entorno Lambda que el despliegue ya resuelve:
+Tres detalles del entorno Lambda que el despliegue ya resuelve:
 
 - `/opt` es de solo lectura: el handler copia el perfil a `/tmp/perfil` al
   empezar (no en el arranque, que tiene un límite de 10 s).
+- Xvfb se arranca desde el handler y se comprueba que su socket acepta
+  conexiones. Así no se reutiliza un socket huérfano si Lambda congela o
+  reinicia el sandbox entre invocaciones.
 - Chrome se lanza con `--no-zygote` (`SRI_CHROME_BANDERAS` en la imagen): sin
   esa bandera el sandbox de Lambda aborta con `Zygote could not fork`.
 
-Frecuencia por defecto: día 5 de cada mes a las 13:00 UTC (08:00 de Ecuador),
-descargando el mes anterior. Se cambia con `--cron`.
+En el **modo estático**, la frecuencia por defecto es el día 5 de cada mes a
+las 13:00 UTC (08:00 de Ecuador), descargando el mes anterior. Se cambia con
+`--cron`. En el **modo dinámico** no hay regla mensual: la aplicación que
+invoca decide la frecuencia.
 
 ### Invocación manual
+
+Modo estático:
 
 ```bash
 aws lambda invoke --function-name sri-txt-robot \
   --payload '{"periodos":["2026-07","2026-08"]}' \
+  --cli-binary-format raw-in-base64-out out.json && cat out.json
+```
+
+Modo dinámico: agregue `ruc` y `sealed_credentials` al payload. El sobre se
+puede generar en el momento (el comando pregunta la contraseña de forma oculta):
+
+```bash
+SOBRE="$(sri-txt-robot sellar-credenciales \
+  --ruc 1758871873001 --public-key "$SRI_ROBOT_PUBLIC_KEY")"
+
+aws lambda invoke --function-name sri-txt-robot \
+  --payload "{\"periodo\":\"2026-09\",\"ruc\":\"1758871873001\",\"sealed_credentials\":\"$SOBRE\"}" \
   --cli-binary-format raw-in-base64-out out.json && cat out.json
 ```
 
@@ -505,6 +654,7 @@ src/sri_txt_robot/
 ├── captcha/       anti-captcha (cliente API) + inyección del token
 ├── portal/        navegación: login Keycloak, captcha, recibidos, cierre de sesión, navegador
 ├── config.py      configuración validada con pydantic
+├── credentials.py credenciales selladas (sodium_crypto_box_seal)
 ├── manifest.py    extracción de claves de acceso (módulo 11 del SRI)
 ├── models.py      Período, tipo de comprobante, credenciales
 ├── period.py      años disponibles y período sugerido

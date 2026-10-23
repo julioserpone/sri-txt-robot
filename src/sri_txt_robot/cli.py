@@ -16,6 +16,7 @@ from pydantic import SecretStr
 from .captcha.anticaptcha import AntiCaptchaClient
 from .captcha.inject import detectar_accion, detectar_sitekey, es_enterprise, es_invisible
 from .config import ConfigError, RobotConfig, RobotEntry, cargar_config, validar_ambiente
+from .credentials import CredencialesError, generar_par_claves, sellar_credenciales
 from .logging import configurar_logging, obtener_logger
 from .manifest import extraer_claves
 from .models import Periodo, TipoComprobante
@@ -414,6 +415,97 @@ def claves(
     typer.echo(f"{len(encontradas)} claves de acceso:")
     for clave in encontradas:
         typer.echo(clave)
+
+
+@app.command("generar-claves")
+def generar_claves(
+    publica: Annotated[
+        Path | None,
+        typer.Option("--publica", help="Archivo donde escribir la clave pública."),
+    ] = None,
+    privada: Annotated[
+        Path | None,
+        typer.Option("--privada", help="Archivo donde escribir la clave privada."),
+    ] = None,
+) -> None:
+    """Genera el par de claves para credenciales selladas.
+
+    La clave pública se configura en la aplicación que invoca al robot
+    (``SRI_ROBOT_PUBLIC_KEY``). La privada se configura en la Lambda
+    (``SRI_CREDENTIALS_PRIVATE_KEY``) y no debe versionarse.
+    """
+    publica_b64, privada_b64 = generar_par_claves()
+
+    if publica is not None:
+        publica.parent.mkdir(parents=True, exist_ok=True)
+        publica.write_text(f"{publica_b64}\n", encoding="utf-8")
+
+    if privada is not None:
+        privada.parent.mkdir(parents=True, exist_ok=True)
+        privada.write_text(f"{privada_b64}\n", encoding="utf-8")
+        privada.chmod(0o600)
+
+    if publica is None:
+        typer.echo(f"SRI_ROBOT_PUBLIC_KEY={publica_b64}")
+    if privada is None:
+        typer.echo(f"SRI_CREDENTIALS_PRIVATE_KEY={privada_b64}")
+
+    typer.secho(
+        "Guarde la clave privada fuera del repositorio. La clave pública puede "
+        "compartirse con la aplicación que invoca al robot.",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
+
+
+@app.command("sellar-credenciales")
+def sellar_credenciales_cmd(
+    ruc: Annotated[
+        str,
+        typer.Option("--ruc", "-r", help="RUC (13 dígitos) o cédula (10) del contribuyente."),
+    ],
+    public_key: Annotated[
+        str,
+        typer.Option(
+            "--public-key",
+            help="Clave pública en base64 o ruta al archivo que la contiene.",
+        ),
+    ],
+    password: Annotated[
+        str | None,
+        typer.Option(
+            "--password",
+            "-w",
+            help="Clave del portal. Si se omite, se pregunta de forma oculta.",
+        ),
+    ] = None,
+    clave_adicional: Annotated[
+        str,
+        typer.Option("--clave-adicional", help="C.I. adicional opcional del portal."),
+    ] = "",
+) -> None:
+    """Genera el valor de ``sealed_credentials`` para probar una invocación."""
+    clave = _pedir_password(ruc, password)
+    if not clave:
+        raise typer.BadParameter("Falta --password.")
+
+    valor = public_key.strip()
+    ruta = Path(valor)
+    if ruta.is_file():
+        valor = ruta.read_text(encoding="utf-8").strip()
+
+    try:
+        sellada = sellar_credenciales(
+            ruc=ruc,
+            password=clave,
+            public_key_b64=valor,
+            clave_adicional=clave_adicional,
+        )
+    except CredencialesError as error:
+        typer.secho(f"Error al sellar: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from error
+
+    typer.echo(sellada)
 
 
 # -- Interno ------------------------------------------------------------

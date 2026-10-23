@@ -14,8 +14,8 @@ COPY deploy/iniciar.sh /opt/iniciar.sh
 
 ENV DISPLAY=:99
 ENV SRI_PERFIL_ORIGEN=/opt/perfil
-# Xvfb puede desaparecer cuando Lambda reutiliza el sandbox; se relanza antes
-# de abrir Chrome si hace falta.
+# Xvfb se arranca de forma perezosa antes de abrir Chrome. Si el sandbox lo
+# perdió o quedó un socket huérfano, el handler lo detecta y lo relanza.
 ENV SRI_ASEGURAR_XVFB=1
 # Lambda no permite que Chrome cree procesos hijos (zygote): sin esta bandera
 # el navegador aborta con "Zygote could not fork" / "GPU process isn't usable".

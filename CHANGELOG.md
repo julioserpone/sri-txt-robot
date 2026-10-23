@@ -33,6 +33,23 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   faltan) bucket S3, repositorio ECR, rol IAM, función con imagen de contenedor
   y regla mensual de EventBridge. Es idempotente: si la función ya existe no
   toca nada salvo `--actualizar`.
+- **Credenciales selladas por invocación** (`sealed_credentials`): el evento
+  puede traer el RUC y la clave del portal cifrados con
+  `sodium_crypto_box_seal` usando la clave pública del robot. La Lambda las
+  abre con `SRI_CREDENTIALS_PRIVATE_KEY`, valida que el RUC coincida con el
+  exterior y ejecuta con un contribuyente dinámico. Permite varios RUC sin
+  recompilar la imagen, sin `SRI_PASSWORD` y sin AWS Secrets Manager. El modo
+  estático sigue funcionando.
+- Comandos `sri-txt-robot generar-claves` y `sri-txt-robot
+  sellar-credenciales` para generar el par de claves y probar el sobre.
+- `scripts/publicar.sh --dinamico` (con `--private-key-file`): publica con
+  `robots: []`, omite `SRI_PASSWORD`, deshabilita la regla mensual de
+  EventBridge y borra el JSON temporal que contiene la clave privada.
+- `SRI_CREDENTIALS_PRIVATE_KEY_ANTERIOR` y
+  `SRI_CREDENTIALS_MAX_AGE_SECONDS` para rotar claves y limitar la antigüedad
+  de los sobres.
+- Dependencia `PyNaCl` para el sellado compatible con el
+  `sodium_crypto_box_seal` de PHP.
 - `deploy/Dockerfile` (Playwright + `awslambdaric`) y
   `deploy/Dockerfile.lambda` (configuración, perfil calentado y banderas de
   Chrome para Lambda).
@@ -80,10 +97,19 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 - En un perfil ya calentado el portal podía completar la navegación antes de que
   `_esperar_sesion` empezara a observarla; la espera agotaba los 90 s aunque la
   sesión ya estuviera establecida. Ahora se comprueba primero la URL actual.
-- Xvfb se arranca antes que el runtime y se espera a su socket: sin eso Chrome
-  fallaba en Lambda con `Missing X server or $DISPLAY`.
-- Xvfb puede desaparecer cuando Lambda reutiliza el microVM; el robot lo detecta
-  y lo relanza antes de abrir Chrome (`SRI_ASEGURAR_XVFB`) en lugar de fallar.
+- Xvfb se arranca de forma perezosa antes de abrir Chrome y se comprueba que
+  su socket acepta conexiones, no solo que el archivo exista: un socket
+  huérfano tras el timeout de inicialización de Lambda hacía que Chrome
+  terminara con `Missing X server or $DISPLAY`.
+- Xvfb puede desaparecer cuando Lambda reutiliza el microVM; el robot lo
+  detecta, retira sockets/locks huérfanos y lo relanza (`SRI_ASEGURAR_XVFB`)
+  antes de abrir Chrome.
+- Si el arranque del navegador falla, `Navegador` detiene Playwright en lugar
+  de dejarlo vivo; en el sandbox reutilizado eso provocaba en la siguiente
+  invocación `Sync API inside the asyncio loop`.
+- El filtro de consulta acepta la cédula de 10 dígitos aunque el portal muestre
+  el RUC completo de 13 (`...001`) en el campo deshabilitado; antes fallaba con
+  "El filtro de RUC está deshabilitado".
 - En Linux el perfil dedicado se atascaba en HTTP/2 al entrar al portal: se
   lanza con `--disable-http2`, igual que el modo clásico.
 - El login tolera que Playwright no reciba el evento de navegación tras pulsar

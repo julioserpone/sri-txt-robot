@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from sri_txt_robot.cli import app
 from sri_txt_robot.config import PortalConfig
+from sri_txt_robot.portal import session
 from sri_txt_robot.portal.session import Navegador, _esperar_cdp, _limpiar_bloqueos, _puerto_libre
 
 
@@ -86,3 +87,40 @@ def test_pantalla_viva_es_falsa_para_una_pantalla_inexistente() -> None:
     from sri_txt_robot.portal.session import _pantalla_viva
 
     assert _pantalla_viva(":sri-inexistente") is False
+
+
+class _PlaywrightFalso:
+    def __init__(self) -> None:
+        self.detenido = False
+
+    def stop(self) -> None:
+        self.detenido = True
+
+
+class _SyncPlaywrightFalso:
+    def __init__(self, playwright: _PlaywrightFalso) -> None:
+        self._playwright = playwright
+
+    def start(self) -> _PlaywrightFalso:
+        return self._playwright
+
+
+def test_si_falla_el_arranque_se_detiene_playwright(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Evita que un fallo deje vivo el bucle de Playwright en el sandbox."""
+    playwright = _PlaywrightFalso()
+    monkeypatch.setattr(session, "sync_playwright", lambda: _SyncPlaywrightFalso(playwright))
+    navegador = Navegador(
+        PortalConfig(perfil_dir="/tmp/perfil-sri", chrome_path="/usr/bin/chrome")
+    )
+
+    def fallar() -> None:
+        raise RuntimeError("fallo de arranque")
+
+    monkeypatch.setattr(navegador, "_abrir_perfil", fallar)
+
+    with pytest.raises(RuntimeError, match="fallo de arranque"):
+        navegador.__enter__()
+
+    assert playwright.detenido is True
