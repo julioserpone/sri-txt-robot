@@ -7,7 +7,9 @@ privilegios de sandbox.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -90,22 +92,28 @@ class Navegador:
 
     def __enter__(self) -> Navegador:
         self._playwright = sync_playwright().start()
+        try:
+            if self._modo_perfil:
+                self._contexto = self._abrir_perfil()
+            else:
+                self._browser = self._playwright.chromium.launch(
+                    headless=self._configuracion.headless,
+                    args=list(BANDERAS),
+                )
+                self._contexto = self._browser.new_context(**self._opciones_contexto())  # type: ignore[arg-type]
 
-        if self._modo_perfil:
-            self._contexto = self._abrir_perfil()
-        else:
-            self._browser = self._playwright.chromium.launch(
-                headless=self._configuracion.headless,
-                args=list(BANDERAS),
-            )
-            self._contexto = self._browser.new_context(**self._opciones_contexto())  # type: ignore[arg-type]
+            self._contexto.set_default_timeout(self._configuracion.timeout_ms)
+            self._contexto.set_default_navigation_timeout(self._configuracion.navigation_timeout_ms)
+            paginas = self._contexto.pages
+            self.pagina = paginas[0] if paginas else self._contexto.new_page()
 
-        self._contexto.set_default_timeout(self._configuracion.timeout_ms)
-        self._contexto.set_default_navigation_timeout(self._configuracion.navigation_timeout_ms)
-        paginas = self._contexto.pages
-        self.pagina = paginas[0] if paginas else self._contexto.new_page()
-
-        return self
+            return self
+        except BaseException as error:
+            # Si el arranque falla, Playwright no debe quedar vivo: el sandbox
+            # de Lambda se reutiliza y un bucle de asyncio residual hace fallar
+            # la siguiente invocación con "Sync API inside the asyncio loop".
+            self.__exit__(type(error), error, error.__traceback__)
+            raise
 
     def _opciones_contexto(self) -> dict[str, object]:
         opciones: dict[str, object] = {
@@ -259,11 +267,11 @@ class Navegador:
         return self._modo_perfil
 
 
-def _pantalla_viva(pantalla: str) -> bool:
-    """Indica si hay un proceso Xvfb sirviendo la pantalla indicada."""
+def _pid_xvfb(pantalla: str) -> int | None:
+    """Devuelve el PID de un Xvfb que atiende la pantalla indicada."""
     raiz = Path("/proc")
     if not raiz.is_dir():
-        return False
+        return None
     for entrada in raiz.iterdir():
         if not entrada.name.isdigit():
             continue
@@ -272,33 +280,142 @@ def _pantalla_viva(pantalla: str) -> bool:
         except OSError:
             continue
         if b"Xvfb" in argumentos and pantalla.encode() in argumentos:
+            try:
+                return int(entrada.name)
+            except ValueError:
+                continue
+    return None
+
+
+def _pantalla_viva(pantalla: str) -> bool:
+    """Indica si hay un proceso Xvfb para la pantalla indicada."""
+    return _pid_xvfb(pantalla) is not None
+
+
+def _socket_pantalla(pantalla: str) -> Path:
+    """Ruta del socket Unix donde Xvfb publica la pantalla."""
+    return Path("/tmp/.X11-unix") / f"X{pantalla.lstrip(':').split('.')[0]}"
+
+
+def _pantalla_responde(pantalla: str) -> bool:
+    """Comprueba que el socket de Xvfb acepta conexiones.
+
+    Que exista el archivo no basta: tras un timeout de inicialización o una
+    congelación de Lambda puede quedar un socket huérfano. Chrome lo interpreta
+    como un servidor X y termina con "Missing X server or $DISPLAY".
+    """
+    ruta = _socket_pantalla(pantalla)
+    if not ruta.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conexion:
+            conexion.settimeout(1)
+            conexion.connect(str(ruta))
+    except OSError:
+        return False
+    return True
+
+
+def _limpiar_socket(pantalla: str) -> None:
+    """Retira sockets y locks huérfanos antes de relanzar Xvfb."""
+    numero = pantalla.lstrip(":").split(".")[0]
+    for ruta in (_socket_pantalla(pantalla), Path(f"/tmp/.X{numero}-lock")):
+        try:
+            ruta.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("no se pudo retirar el resto de Xvfb %s", ruta, exc_info=True)
+
+
+def _terminar_proceso(pid: int) -> None:
+    """Termina un Xvfb que quedó vivo pero sin responder."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    for _ in range(30):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+
+
+def _pantallas_candidatas(pantalla: str) -> tuple[str, ...]:
+    """Pantallas a probar si la configurada quedó inservible."""
+    numero = pantalla.lstrip(":").split(".")[0]
+    try:
+        base = int(numero)
+    except ValueError:
+        base = 99
+    return tuple(f":{actual}" for actual in range(base, base + 10))
+
+
+def _iniciar_xvfb(pantalla: str) -> bool:
+    """Arranca Xvfb y espera a que el socket acepte conexiones."""
+    Path("/tmp/.X11-unix").mkdir(parents=True, exist_ok=True)
+    _limpiar_socket(pantalla)
+    registro = tempfile.NamedTemporaryFile(  # noqa: SIM115 - el hijo conserva el descriptor
+        prefix="sri-xvfb-", suffix=".log", delete=False
+    )
+    proceso = subprocess.Popen(
+        ["Xvfb", pantalla, "-screen", "0", "1440x900x24"],
+        stdout=subprocess.DEVNULL,
+        stderr=registro,
+        start_new_session=True,
+    )
+    registro.close()
+
+    for _ in range(100):
+        if proceso.poll() is not None:
+            detalle = _ultimas_lineas(Path(registro.name))
+            logger.error(
+                "Xvfb terminó antes de estar listo",
+                extra={"pantalla": pantalla, "codigo": proceso.returncode, "detalle": detalle},
+            )
+            return False
+        if _pantalla_responde(pantalla):
+            logger.info("Xvfb escuchando", extra={"pantalla": pantalla, "pid": proceso.pid})
             return True
+        time.sleep(0.1)
+
+    logger.error("Xvfb no respondió en 10 s", extra={"pantalla": pantalla, "pid": proceso.pid})
+    proceso.terminate()
+    try:
+        proceso.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proceso.kill()
     return False
 
 
 def _asegurar_pantalla() -> None:
-    """Relanza Xvfb si el sandbox lo perdió entre invocaciones.
+    """Garantiza una pantalla Xvfb viva antes de abrir Chrome.
 
     Lambda reutiliza el microVM entre ejecuciones y el proceso de Xvfb puede
-    desaparecer. Sin él Chrome aborta con "Missing X server or $DISPLAY".
+    desaparecer o dejar un socket huérfano. Sin una pantalla real Chrome aborta
+    con "Missing X server or $DISPLAY". Si la pantalla configurada no responde,
+    se prueba otra para no reutilizar un socket muerto.
     """
     pantalla = os.environ.get("DISPLAY", ":99").strip() or ":99"
-    if _pantalla_viva(pantalla):
+    if _pantalla_viva(pantalla) and _pantalla_responde(pantalla):
         return
 
-    logger.info("Xvfb no está activo; se reinicia", extra={"pantalla": pantalla})
-    subprocess.Popen(
-        ["Xvfb", pantalla, "-screen", "0", "1440x900x24"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    socket = Path("/tmp/.X11-unix") / f"X{pantalla.lstrip(':')}"
-    for _ in range(100):
-        if socket.exists():
+    pid = _pid_xvfb(pantalla)
+    if pid is not None:
+        logger.warning("Xvfb no responde; se reinicia", extra={"pantalla": pantalla, "pid": pid})
+        _terminar_proceso(pid)
+    else:
+        logger.info("Xvfb no está activo; se reinicia", extra={"pantalla": pantalla})
+
+    for candidata in _pantallas_candidatas(pantalla):
+        if _pantalla_viva(candidata):
+            continue
+        if _iniciar_xvfb(candidata):
+            os.environ["DISPLAY"] = candidata
             return
-        time.sleep(0.1)
-    raise RuntimeError(f"Xvfb no arrancó en {pantalla}")
+
+    raise RuntimeError("Xvfb no arrancó en ninguna pantalla disponible")
 
 
 def _limpiar_bloqueos(perfil: Path) -> None:

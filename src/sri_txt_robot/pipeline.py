@@ -212,7 +212,7 @@ class Robot:
                 self._selectores,
                 periodo,
                 tipo,
-                ruc=ruc.ruc,
+                ruc=ruc.credenciales.usuario_portal,
             )
 
             descarga: DescargaPortal = consultar_y_descargar(

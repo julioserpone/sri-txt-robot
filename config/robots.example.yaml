@@ -3,6 +3,10 @@
 # Los secretos NO se escriben aquí: use variables de entorno (${NOMBRE}) o el
 # nombre de una variable con 'password_env'. En Lambda la clave llega en la
 # variable de entorno de la función; no se usa Secrets Manager.
+#
+# Para credenciales selladas por invocación (varios RUC, sin SRI_PASSWORD),
+# use 'robots: []' y despliegue con scripts/publicar.sh --dinamico. El RUC y
+# la clave llegan dentro de 'sealed_credentials' en cada evento.
 
 version: 1
 
@@ -98,3 +102,12 @@ robots:
   #   etiqueta: "Persona natural"
   #   tipos: ["01", "04"]
   #   activo: false
+
+# -- Modo dinámico ---------------------------------------------------------
+# Si la aplicación invoca la Lambda con 'sealed_credentials' (varios RUC sin
+# recompilar y sin SRI_PASSWORD), reemplace todo el bloque 'robots' por:
+#
+# robots: []
+#
+# El RUC y la clave se descifran del evento. Vea la sección "Credenciales
+# selladas por invocación" del README.

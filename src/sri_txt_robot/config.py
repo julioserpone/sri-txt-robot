@@ -173,6 +173,15 @@ class RobotConfig(_Base):
     def rucs_activos(self) -> list[ConfigRuc]:
         return [entrada.a_config_ruc() for entrada in self.robots if entrada.activo]
 
+    def con_robot(self, entrada: RobotEntry) -> RobotConfig:
+        """Devuelve una copia con un único contribuyente dinámico.
+
+        Se usa cuando las credenciales llegan selladas en el evento de Lambda:
+        la configuración base aporta portal, captcha y almacenamiento, pero el
+        RUC y la clave se sustituyen por los del sobre.
+        """
+        return self.model_copy(update={"robots": (entrada,)})
+
 
 class ConfigError(RuntimeError):
     """Error de configuración del robot."""

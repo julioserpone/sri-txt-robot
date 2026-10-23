@@ -150,6 +150,20 @@ def configurar_filtros(
     )
 
 
+def _ruc_coincide(actual: str, solicitado: str) -> bool:
+    """Compara el RUC del portal con el solicitado.
+
+    El SRI compone el RUC de una persona natural agregando ``001`` a la cédula
+    de 10 dígitos. El campo del filtro muestra esa forma de 13 dígitos aunque
+    la configuración use la cédula, así que ambas representaciones son válidas.
+    """
+    if actual == solicitado:
+        return True
+    if len(solicitado) == 10 and actual == f"{solicitado}001":
+        return True
+    return len(actual) == 10 and solicitado == f"{actual}001"
+
+
 def _ajustar_ruc(campo: Locator, ruc: str) -> None:
     """Ajusta el RUC del filtro de consulta.
 
@@ -162,7 +176,7 @@ def _ajustar_ruc(campo: Locator, ruc: str) -> None:
     except PlaywrightTimeoutError:
         actual = ""
 
-    if actual == ruc:
+    if _ruc_coincide(actual, ruc):
         return
     if campo.is_enabled():
         campo.fill(ruc)

@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# Publica el robot en AWS Lambda (imagen de contenedor) con EventBridge mensual.
+# Publica el robot en AWS Lambda (imagen de contenedor). La regla mensual de
+# EventBridge se crea solo en el modo estático.
 #
 # - Idempotente: si la función ya existe no hace nada salvo que pase --actualizar.
-# - Sin AWS Secrets Manager: la clave del portal va como variable de entorno de
-#   la función (cifrada en reposo por Lambda).
+# - Sin AWS Secrets Manager: en el modo estático la clave del portal va como
+#   variable de entorno de la función; en el modo dinámico llega cifrada en
+#   cada evento (sealed_credentials).
 # - Recursos mínimos: bucket S3 + repositorio ECR + rol IAM + función + regla.
 #
-# Uso:
+# Uso estático:
 #   scripts/publicar.sh --ruc 1758871873001 --password '...' --ambiente produccion
+#
+# Uso dinámico (varios RUC, sin SRI_PASSWORD):
+#   scripts/publicar.sh --dinamico --private-key-file ~/.sri-txt-robot/privada.b64 \
+#     --ambiente produccion
 #
 # Antes de ejecutarlo, el perfil de Chrome debe estar "calentado" en esta
 # máquina (sri-txt-robot calentar) porque se copia dentro de la imagen.
@@ -29,6 +35,9 @@ MEMORIA=3008
 TIMEOUT=900
 ACTUALIZAR=0
 ROL="sri-txt-robot-lambda"
+DINAMICO=0
+CLAVE_PRIVADA=""
+CLAVE_PRIVADA_ARCHIVO=""
 
 uso() {
     cat <<'TEXTO'
@@ -41,7 +50,7 @@ Opciones:
                         resolver el captcha solo).
   --ambiente NOMBRE     dev (por defecto), test o produccion.
   --bucket NOMBRE       Bucket S3. Por defecto sri-txt-robot-<cuenta>-<ambiente>.
-  --tipos LISTA         Tipos separados por comas (por defecto 01).
+  --tipos LISTA         Tipos separados por comas (por defecto 01), solo modo estático.
   --perfil RUTA         Perfil de Chrome calentado. Para Lambda debe haberse
                         calentado dentro de Linux (~/.sri-txt-robot/perfil-linux).
   --funcion NOMBRE      Nombre de la función de Lambda (sri-txt-robot).
@@ -49,6 +58,11 @@ Opciones:
   --cron EXPRESION      Frecuencia de EventBridge (mensual por defecto).
   --memoria MB          Memoria de la función (3008).
   --timeout SEGUNDOS    Tiempo máximo de la función (900).
+  --dinamico            Credenciales selladas por evento. No usa SRI_PASSWORD,
+                        no exige --ruc/--password y no crea la regla mensual.
+  --private-key CLAVE   Clave privada base64 para --dinamico (visible en ps).
+  --private-key-file RUTA
+                        Archivo con la clave privada base64. Recomendado.
   --actualizar          Vuelve a desplegar aunque la función ya exista.
   -h, --help            Muestra esta ayuda.
 TEXTO
@@ -68,14 +82,17 @@ while [[ $# -gt 0 ]]; do
         --cron) CRON="$2"; shift 2 ;;
         --memoria) MEMORIA="$2"; shift 2 ;;
         --timeout) TIMEOUT="$2"; shift 2 ;;
+        --dinamico) DINAMICO=1; shift ;;
+        --private-key) CLAVE_PRIVADA="$2"; shift 2 ;;
+        --private-key-file) CLAVE_PRIVADA_ARCHIVO="$2"; shift 2 ;;
         --actualizar) ACTUALIZAR=1; shift ;;
         -h | --help) uso; exit 0 ;;
         *) echo "Opción desconocida: $1" >&2; uso >&2; exit 2 ;;
     esac
 done
 
-if ! [[ "$RUC" =~ ^[0-9]{10}([0-9]{3})?$ ]]; then
-    echo "Indique un RUC o cédula válidos con --ruc." >&2
+if [[ "$DINAMICO" -eq 0 ]] && ! [[ "$RUC" =~ ^[0-9]{10}([0-9]{3})?$ ]]; then
+    echo "Indique un RUC o cédula válidos con --ruc (o use --dinamico)." >&2
     exit 2
 fi
 
@@ -84,7 +101,35 @@ if ! [[ "$AMBIENTE" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
     exit 2
 fi
 
-if [[ -z "$PASSWORD" ]]; then
+if [[ "$DINAMICO" -eq 1 ]]; then
+    if [[ -n "$CLAVE_PRIVADA" && -n "$CLAVE_PRIVADA_ARCHIVO" ]]; then
+        echo "Use --private-key o --private-key-file, no ambos." >&2
+        exit 2
+    fi
+
+    if [[ -n "$CLAVE_PRIVADA_ARCHIVO" ]]; then
+        if [[ ! -f "$CLAVE_PRIVADA_ARCHIVO" ]]; then
+            echo "No existe el archivo de clave privada: $CLAVE_PRIVADA_ARCHIVO" >&2
+            exit 2
+        fi
+        CLAVE_PRIVADA="$(tr -d '[:space:]' < "$CLAVE_PRIVADA_ARCHIVO")"
+    fi
+
+    if [[ -z "$CLAVE_PRIVADA" ]]; then
+        CLAVE_PRIVADA="${SRI_CREDENTIALS_PRIVATE_KEY:-}"
+    fi
+
+    if [[ -z "$CLAVE_PRIVADA" ]]; then
+        echo "Falta la clave privada. Use --private-key-file, --private-key o" >&2
+        echo "la variable SRI_CREDENTIALS_PRIVATE_KEY." >&2
+        exit 2
+    fi
+
+    if ! python3 -c 'import base64,sys; datos=base64.b64decode(sys.argv[1], validate=True); raise SystemExit(0 if len(datos) == 32 else 1)' "$CLAVE_PRIVADA" 2>/dev/null; then
+        echo "La clave privada no es base64 válido de 32 bytes." >&2
+        exit 2
+    fi
+elif [[ -z "$PASSWORD" ]]; then
     if [[ ! -t 0 ]]; then
         echo "Falta --password y no hay terminal para preguntarla." >&2
         exit 2
@@ -196,6 +241,16 @@ portal:
 
 storage:
   ambiente: "${AMBIENTE}"
+YAML
+
+if [[ "$DINAMICO" -eq 1 ]]; then
+    cat >> deploy/build/config/robots.yaml <<'YAML'
+
+# Modo dinámico: el RUC y la clave llegan sellados en cada evento.
+robots: []
+YAML
+else
+    cat >> deploy/build/config/robots.yaml <<YAML
 
 robots:
   - ruc: "${RUC}"
@@ -204,6 +259,7 @@ robots:
     tipos: ${TIPOS_YAML}
     activo: true
 YAML
+fi
 
 rsync -a --delete "$PERFIL/" deploy/build/perfil/
 
@@ -254,20 +310,29 @@ ARN_ROL="arn:aws:iam::${CUENTA}:role/${ROL}"
 echo
 echo "== Función Lambda: $FUNCION =="
 # JSON generado con python3 para que la clave pueda llevar comas, '=' o comillas.
-python3 - "$PASSWORD" "$AMBIENTE" "$BUCKET" "$ANTICAPTCHA" > deploy/build/entorno.json <<'PYJSON'
+python3 - "$PASSWORD" "$AMBIENTE" "$BUCKET" "$ANTICAPTCHA" "$DINAMICO" "$CLAVE_PRIVADA" \
+    > deploy/build/entorno.json <<'PYJSON'
 import json
 import sys
 
 variables = {
-    "SRI_PASSWORD": sys.argv[1],
     "SRI_AMBIENTE": sys.argv[2],
     "SRI_BUCKET": sys.argv[3],
 }
+
+if sys.argv[5] == "1":
+    # Modo dinámico: la contraseña del portal nunca se guarda en la función.
+    variables["SRI_CREDENTIALS_PRIVATE_KEY"] = sys.argv[6]
+else:
+    variables["SRI_PASSWORD"] = sys.argv[1]
+
 if sys.argv[4]:
     variables["ANTICAPTCHA_API_KEY"] = sys.argv[4]
 
 json.dump({"Variables": variables}, sys.stdout)
 PYJSON
+chmod 600 deploy/build/entorno.json
+trap 'rm -f deploy/build/entorno.json' EXIT
 
 if aws lambda get-function --function-name "$FUNCION" --region "$REGION" >/dev/null 2>&1; then
     aws lambda update-function-code --function-name "$FUNCION" --region "$REGION" \
@@ -299,24 +364,45 @@ else
     echo "Creada."
 fi
 
+# El JSON contiene SRI_PASSWORD o la clave privada: no dejarlo en disco.
+rm -f deploy/build/entorno.json
+
 # -- Regla mensual de EventBridge -----------------------------------------
-echo
-echo "== Regla de EventBridge: $CRON =="
 REGLA="${FUNCION}-mensual"
-aws events put-rule --name "$REGLA" --region "$REGION" \
-    --schedule-expression "$CRON" --state ENABLED >/dev/null
-ARN_REGLA="$(aws events describe-rule --name "$REGLA" --region "$REGION" --query Arn --output text)"
-aws lambda add-permission --function-name "$FUNCION" --region "$REGION" \
-    --statement-id "${REGLA}-invocar" --action lambda:InvokeFunction \
-    --principal events.amazonaws.com --source-arn "$ARN_REGLA" >/dev/null 2>&1 || true
-aws events put-targets --rule "$REGLA" --region "$REGION" \
-    --targets "Id=robot,Arn=${ARN_FUNCION}" >/dev/null
-echo "Configurada."
+if [[ "$DINAMICO" -eq 1 ]]; then
+    echo
+    echo "== EventBridge: omitido en modo dinámico =="
+    echo "Las invocaciones llegan de la aplicación con sealed_credentials."
+    if aws events describe-rule --name "$REGLA" --region "$REGION" >/dev/null 2>&1; then
+        aws events disable-rule --name "$REGLA" --region "$REGION" >/dev/null
+        echo "Regla existente $REGLA deshabilitada."
+    fi
+else
+    echo
+    echo "== Regla de EventBridge: $CRON =="
+    aws events put-rule --name "$REGLA" --region "$REGION" \
+        --schedule-expression "$CRON" --state ENABLED >/dev/null
+    ARN_REGLA="$(aws events describe-rule --name "$REGLA" --region "$REGION" --query Arn --output text)"
+    aws lambda add-permission --function-name "$FUNCION" --region "$REGION" \
+        --statement-id "${REGLA}-invocar" --action lambda:InvokeFunction \
+        --principal events.amazonaws.com --source-arn "$ARN_REGLA" >/dev/null 2>&1 || true
+    aws events put-targets --rule "$REGLA" --region "$REGION" \
+        --targets "Id=robot,Arn=${ARN_FUNCION}" >/dev/null
+    echo "Configurada."
+fi
 
 echo
 echo "Publicado."
 echo "  Función:  $FUNCION ($REGION, $ARQUITECTURA)"
 echo "  Imagen:   $IMAGEN"
-echo "  Bucket:   s3://$BUCKET/$AMBIENTE/$RUC/<periodo>/"
-echo "  Prueba:   aws lambda invoke --function-name $FUNCION --region $REGION \\"
-echo "              --payload '{\"periodo\":\"2026-09\"}' /tmp/salida.json && cat /tmp/salida.json"
+RUC_SALIDA="${RUC:-<ruc>}"
+echo "  Bucket:   s3://$BUCKET/$AMBIENTE/$RUC_SALIDA/<periodo>/"
+if [[ "$DINAMICO" -eq 1 ]]; then
+    echo "  Credenciales: selladas por evento (sealed_credentials)."
+    echo "  Configure SRI_ROBOT_PUBLIC_KEY con la clave pública en la aplicación."
+    echo "  Genere un sobre de prueba con:"
+    echo "    sri-txt-robot sellar-credenciales --ruc $RUC_SALIDA --public-key <clave-publica>"
+else
+    echo "  Prueba:   aws lambda invoke --function-name $FUNCION --region $REGION \\"
+    echo "              --payload '{\"periodo\":\"2026-09\"}' /tmp/salida.json && cat /tmp/salida.json"
+fi

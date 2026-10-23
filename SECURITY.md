@@ -31,14 +31,19 @@ Este proyecto maneja secretos de terceros y datos fiscales. En particular:
 | Área | Medida |
 | --- | --- |
 | Clave de anti-captcha | Solo por variable de entorno o Secrets Manager. Nunca en el YAML versionado. |
-| Clave del portal del SRI | Solo por variable de entorno o Secrets Manager. |
+| Clave del portal del SRI | En el modo estático, solo por variable de entorno. En el dinámico, cifrada con `sodium_crypto_box_seal` en `sealed_credentials`; la Lambda la descifra en memoria. |
+| Clave privada de credenciales selladas | Solo en `SRI_CREDENTIALS_PRIVATE_KEY` (o la anterior durante una rotación). No se versiona ni se escribe en el evento. |
 | TXT y XML descargados | Cifrados en reposo (SSE-S3) y permisos 0600 en local. |
 | Logs | No incluyen credenciales, tokens de captcha ni el contenido de los TXT. |
-| Selectores y configuración | Sin datos de contribuyentes; el RUC va en `config/robots.yaml`, que está en `.gitignore`. |
+| Selectores y configuración | Sin datos de contribuyentes; el RUC va en `config/robots.yaml` o en el evento cifrado. |
 
 ## Recomendaciones para el operador
 
-- Restrinja el acceso al bucket de S3 y al secreto de Secrets Manager.
+- Restrinja el acceso al bucket de S3, a la configuración de la función y a
+  `SRI_CREDENTIALS_PRIVATE_KEY`. Quien pueda leer esa variable puede abrir los
+  sobres de credenciales.
+- Rote la clave privada con `SRI_CREDENTIALS_PRIVATE_KEY_ANTERIOR` y retire la
+  anterior cuando todas las aplicaciones usen la nueva.
 - Cifre el bucket con una CMK de KMS si la política lo exige.
 - Conserve los TXT y XML solo el tiempo necesario para el proceso contable.
   La retención legal de los comprobantes es de 7 años, pero el reporte TXT es
