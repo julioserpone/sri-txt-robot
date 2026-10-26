@@ -72,29 +72,31 @@ El paquete PHP **no se toca** para esto: sigue siendo la capa de integración
 con los WSDL oficiales. La frontera entre ambos es un archivo (el TXT o su
 manifiesto JSON de claves).
 
-### Runtime: AWS Lambda (imagen de contenedor) + EventBridge
+### Runtime: AWS Lambda (ZIP + runtime en S3)
 
 - El trabajo es **mensual y a ráfagas**: Lambda encaja exactamente en ese
   perfil. 12 invocaciones al año cuestan céntimos, frente a ~USD 15-20/mes de
   una instancia EC2 siempre encendida.
-- Playwright necesita Chromium (~150 MB) y sus dependencias de sistema → **imagen
-  de contenedor**, no un ZIP. La imagen parte de
-  `mcr.microsoft.com/playwright/python:v1.64.0-noble`, que ya trae Chromium y
-  sus dependencias, y añade `awslambdaric` como Runtime Interface Client. Al
-  traer su propia userland, la imagen de Playwright es válida en Lambda: la
-  restricción de glibc aplica a los runtimes gestionados y a los paquetes ZIP,
-  no a las imágenes de contenedor.
-- Dentro del contenedor se arranca **Xvfb** de forma perezosa, justo antes de
-  abrir Chrome, y este corre "con ventana": en headless se anuncia como
-  `HeadlessChrome` y el portal no responde.
+- El paquete es un **ZIP** de ~51 MB (149 MB descomprimido), no una imagen de
+  contenedor. Chromium, Xvfb, sus dependencias de sistema y el perfil calentado
+  viven en un prefijo privado de S3 y se extraen a `/tmp` **solo cuando la
+  invocación tiene descargas pendientes**. Así no hace falta ECR y el
+  almacenamiento baja a ~0,25 GB.
+- Los artefactos se construyen con Docker sobre la misma base AL2023 del
+  runtime gestionado (`scripts/construir_zip.sh`), para que el binario de
+  Chromium y sus librerías sean compatibles con Lambda. El bundle incluye
+  `xkbcomp`, `xkeyboard-config` y los módulos PKCS#11 de NSS que Chromium
+  necesita.
+- **Xvfb** se arranca de forma perezosa, justo antes de abrir Chrome, y este
+  corre "con ventana": en headless se anuncia como `HeadlessChrome` y el portal
+  no responde.
 - **Credenciales sin Secrets Manager**: en el modo estático la clave del portal
   va en una variable de entorno de la función (cifrada en reposo por Lambda).
   En el modo dinámico cada invocación trae un sobre `sealed_credentials`
   cifrado con la clave pública del robot; la Lambda solo guarda la clave
   privada. Los resultados van a S3.
-- El despliegue lo hace `scripts/publicar.sh` (bucket, ECR, IAM, Lambda y,
-  solo en el modo estático, la regla mensual de EventBridge), no una plantilla
-  SAM.
+- El despliegue lo hace `scripts/publicar_zip.sh` (sube bundle, perfil y ZIP a
+  S3 y crea o actualiza la función por referencia), no una plantilla SAM.
 - Alternativa si prefieres un servidor: el robot es un CLI (`sri-txt-robot
   descargar`), así que un `cron` en EC2 o un `systemd timer` funcionan igual.
 
@@ -141,6 +143,8 @@ manifiesto JSON de claves).
   si hace falta.
 - Google Chrome instalado (solo para el perfil dedicado; el modo clásico usa
   el Chromium de Playwright).
+- Docker, solo para construir los artefactos del despliegue ZIP
+  (`scripts/construir_zip.sh`).
 - anti-captcha es **opcional**: hoy el portal rechaza sus tokens, así que el
   robot funciona sin cuenta.
 
@@ -367,24 +371,32 @@ $clave = "produccion/{$ruc}/{$periodo}/facturas-recibidas-{$periodo}-claves.json
 
 ## Despliegue en AWS
 
-> **Estado (oct-2026): validado de extremo a extremo en Lambda.**
+> **Estado (oct-2026): validado de extremo a extremo en Lambda (ZIP).**
 > El captcha lo resuelve el propio navegador, sin anti-captcha: 44 claves en
-> 2026-09 y 24 en 2026-08, en ejecuciones de 45-60 s. La clave está en calentar
-> el perfil **dentro del contenedor Linux** (el perfil calentado en macOS no
-> transfiere la confianza) y en lanzar Chrome con `--no-zygote`, porque el
-> sandbox de Lambda no permite el `fork` del zygote.
+> 2026-09 y 24 en 2026-08, en ejecuciones de 29-60 s. La clave está en calentar
+> el perfil **dentro de Linux** (el perfil calentado en macOS no transfiere la
+> confianza) y en lanzar Chrome con `--no-zygote`, porque el sandbox de Lambda
+> no permite el `fork` del zygote. La función de producción `sri-txt-robot`
+> corre como ZIP arm64, 3008 MB y 900 s.
 
-El robot corre en **Lambda con imagen de contenedor**, guarda los TXT en S3 y
-tiene dos modos de credenciales:
+El robot corre en **Lambda con paquete ZIP** (el navegador se sirve desde S3),
+guarda los TXT en S3 y tiene dos modos de credenciales:
 
-- **Estático:** un RUC fijo en la imagen y `SRI_PASSWORD` en la función. La
-  regla mensual de EventBridge lo ejecuta.
+- **Estático:** un RUC fijo en la configuración y `SRI_PASSWORD` en la función.
+  La regla mensual de EventBridge puede ejecutarlo.
 - **Dinámico:** `robots: []`, sin `SRI_PASSWORD`; cada invocación trae el RUC y
-  la clave cifrados en `sealed_credentials`. Sirve para varios RUC sin
-  recompilar y sin Secrets Manager. No se crea la regla mensual: EventBridge no
-  puede generar sobres, así que la aplicación que invoca decide cuándo.
+  la clave cifrados en `sealed_credentials`. Es el modo de producción: sirve
+  para varios RUC sin recompilar y sin Secrets Manager. No se usa la regla
+  mensual (EventBridge no puede generar sobres), así que la aplicación que
+  invoca decide cuándo. La regla `sri-txt-robot-mensual` sigue creada pero
+  **deshabilitada**.
 
-### Modo estático
+### Modo estático (heredado, solo imagen)
+
+> **Obsoleto.** `scripts/publicar.sh` crea una imagen de contenedor y un
+> repositorio ECR; el flujo de producción es ZIP (vea
+> [Despliegue ZIP](#despliegue-zip-recomendado)). El script se niega a
+> ejecutarse salvo que exporte `SRI_PERMITIR_PUBLICAR_IMAGEN=1`.
 
 ```bash
 ./scripts/publicar.sh \
@@ -402,7 +414,7 @@ El script pide la clave de forma oculta (o `--password '...'`) y es
 3. Si no existe, crea lo mínimo: bucket S3 (privado, cifrado), repositorio ECR,
    rol IAM, función Lambda (`arm64`, 3008 MB, 900 s) y regla de EventBridge.
 
-Lo que se publica:
+Lo que publica:
 
 - `deploy/build/perfil`: copia del perfil de Chrome calentado (se quitan los
   `Singleton*`, que en Linux hacen que Chrome crea que el perfil está en uso).
@@ -411,8 +423,8 @@ Lo que se publica:
 
 ### Credenciales selladas por invocación
 
-Este modo permite atender **varios RUC con una sola Lambda** sin recompilar la
-imagen y sin guardar la contraseña del portal en la función. Cada invocación
+Este modo permite atender **varios RUC con una sola Lambda** sin volver a
+desplegar y sin guardar la contraseña del portal en la función. Cada invocación
 lleva un RUC (puede incluir varios `periodos`); para varios contribuyentes, la
 aplicación sella e invoca una vez por RUC. La aplicación que invoca cifra un
 pequeño JSON con la clave **pública** del robot usando
@@ -431,24 +443,22 @@ sri-txt-robot generar-claves \
 - `SRI_CREDENTIALS_PRIVATE_KEY`: clave privada en la Lambda. No la versiones,
   no la pases por argumentos si puedes usar un archivo y no la registres.
 
-Despliegue dinámico:
+Despliegue dinámico (ZIP):
 
 ```bash
-./scripts/publicar.sh --dinamico \
+AWS_PROFILE=sri-robot ./scripts/publicar_zip.sh \
+  --funcion sri-txt-robot \
   --private-key-file ~/.sri-txt-robot/privada.b64 \
-  --perfil ~/.sri-txt-robot/perfil-linux \
-  --ambiente produccion \
+  --env-file ~/.sri-txt-robot/lambda.env \
   --actualizar
 ```
 
 El script genera `robots: []`, configura solo `SRI_CREDENTIALS_PRIVATE_KEY`,
-`SRI_AMBIENTE` y `SRI_BUCKET`, no crea la regla mensual (y deshabilita una
-existente) y borra el JSON temporal con la clave privada. Si el perfil no se
-pasa, usa `~/.sri-txt-robot/perfil` como antes.
-
-El script usa `us-east-1` por defecto. Si la función ya está en otra región,
-agregue `--region us-east-2` (o la que corresponda). Si sus credenciales están
-en un perfil distinto de `default`, exporte `AWS_PROFILE=...` antes de ejecutar.
+`SRI_AMBIENTE` y `SRI_BUCKET` (más lo que traiga `--env-file`) y **no** crea la
+regla mensual. Toma el perfil de `dist/runtime/perfil.tar.gz` y el bundle de
+`dist/runtime/`; ambos se generan con `scripts/construir_zip.sh`. La región por
+defecto es `us-east-2`. Si sus credenciales están en un perfil distinto de
+`default`, exporte `AWS_PROFILE=...` antes de ejecutar.
 
 El evento tiene este contrato:
 
@@ -512,6 +522,105 @@ El comando pide la contraseña de forma oculta y escribe el base64 que va en
 `sealed_credentials`. No registre el evento completo: contiene la contraseña
 cifrada y el sobre podría reutilizarse mientras no caduque.
 
+### Despliegue ZIP (recomendado)
+
+Este es el despliegue de producción: un **ZIP** sin repositorio ECR. El
+navegador no cabe en el paquete (Lambda limita el ZIP a 250 MB sin comprimir),
+así que Chromium, Xvfb, las librerías y el perfil se guardan en un prefijo
+privado del bucket y se extraen en `/tmp` **solo cuando la invocación tiene
+descargas pendientes**.
+
+Construir los artefactos (Docker, misma base AL2023 que Lambda):
+
+```bash
+./scripts/construir_zip.sh --ambiente produccion
+```
+
+Genera:
+
+| Artefacto | Tamaño |
+|---|---:|
+| `dist/runtime/browser-<arch>-<playwright>-<chromium>.tar.gz` | ~242 MB |
+| `dist/runtime/perfil.tar.gz` | ~21 MB |
+| `dist/funcion.zip` (149 MB descomprimido) | ~51 MB |
+
+El bundle incluye lo que el runtime de Lambda no trae y Chromium/Xvfb
+necesitan sin red: `xkeyboard-config`, el binario `xkbcomp` y los módulos
+PKCS#11 de NSS (`libsoftokn3`, `libfreebl3`, `libnssckbi`…). El `Xvfb` del
+bundle se compila con `/usr/bin` fijo para invocar `xkbcomp`; como en Lambda
+ese directorio es de solo lectura, el build parchea ese literal a `/tmp/xkb` y
+`sri_txt_robot.runtime` enlaza ahí el `xkbcomp` incluido. Sin los módulos NSS,
+Chrome aborta con `FATAL:crypto/nss_util.cc nss_error=-5925`.
+
+Publicar una función de prueba (no toca producción):
+
+```bash
+AWS_PROFILE=sri-robot ./scripts/publicar_zip.sh --funcion sri-txt-robot-zip
+```
+
+Actualizar la función de producción (mismo nombre, mismo rol y misma clave
+privada que la función existente):
+
+```bash
+AWS_PROFILE=sri-robot ./scripts/publicar_zip.sh \
+  --funcion sri-txt-robot \
+  --env-file ~/.sri-txt-robot/lambda.env \
+  --actualizar
+```
+
+Con callback firmado, el secreto se pasa por archivo para no dejarlo en el
+historial:
+
+```bash
+AWS_PROFILE=sri-robot ./scripts/publicar_zip.sh \
+  --funcion sri-txt-robot \
+  --callback-url https://app.ejemplo.com/api/v1/webhooks/sri-robot \
+  --callback-secret-file ~/.sri-txt-robot/callback.secret \
+  --actualizar
+```
+
+Producción todavía no tiene `SRI_CALLBACK_URL`: hasta que exista una URL
+pública de staging, omita estas dos opciones y use la conciliación por S3.
+
+El script sube el bundle, el perfil y el propio ZIP a `_runtime/` y crea la
+función por referencia a S3: el paquete supera los 50 MB y `CreateFunction`
+rechaza el envío directo (el cuerpo en base64 supera el límite de 70 MB).
+
+Para secretos adicionales, como la clave de anti-captcha, use `--env-file` con
+un archivo `KEY=VALUE` fuera del repositorio:
+
+```bash
+AWS_PROFILE=sri-robot ./scripts/publicar_zip.sh \
+  --funcion sri-txt-robot-zip \
+  --env-file ~/.sri-txt-robot/lambda.env
+```
+
+Variables que configura el script:
+
+| Variable | Uso |
+|---|---|
+| `SRI_RUNTIME_BUCKET`, `SRI_RUNTIME_BROWSER_KEY/SHA256` | Bundle del navegador. |
+| `SRI_RUNTIME_PERFIL_KEY/SHA256` | Perfil calentado. |
+| `SRI_ROBOT_CONFIG`, `SRI_ROBOT_SELECTORS` | Configuración bajo `/var/task/config`. |
+| `DISPLAY`, `SRI_ASEGURAR_XVFB`, `SRI_CHROME_BANDERAS` | Xvfb y banderas de Chrome. |
+
+El bootstrap verifica el SHA-256 antes de extraer y es atómico: si falla, no
+deja un runtime a medias. El código está en `sri_txt_robot.runtime`.
+
+Ventaja: ECR desaparece y el almacenamiento pasa a ~0,25 GB en S3
+(~0,006 USD/mes). Coste: la primera invocación con trabajo paga la descarga y
+extracción (~30-60 s); las siguientes reutilizan `/tmp` mientras el sandbox
+siga caliente. Una invocación sin trabajo responde en segundos porque no
+materializa nada.
+
+Validado en AWS (oct-2026): la función de producción `sri-txt-robot` (arm64,
+3008 MB, ZIP) descargó 44 facturas de 2026-09 con el captcha resuelto por el
+navegador en ~32 s, usando credenciales selladas por invocación. En la función
+de prueba el bootstrap descargó y verificó el bundle (254 MB, 1,5 s) y el
+perfil, extrajo ambos en ~6 s y Xvfb arrancó con el keymap del bundle. El
+callback `failed` llegó firmado al endpoint de `autotributo` con `202` en el
+primer intento durante esa validación. La URL pública de callback todavía no
+está configurada en producción; actualícela con `--actualizar` cuando exista.
 
 ### Calentar el perfil dentro de Linux
 
@@ -539,8 +648,11 @@ Elija un mes cerrado, día **Todos**, pulse **Consultar** y espere la tabla. El
 comando termina solo y deja el perfil en `deploy/build/perfil`; después:
 
 ```bash
-./scripts/publicar.sh --perfil deploy/build/perfil --ruc 1758871873001 \
-  --ambiente produccion --tipos 01,03,04,05,07 --actualizar
+./scripts/construir_zip.sh --ambiente produccion
+AWS_PROFILE=sri-robot ./scripts/publicar_zip.sh \
+  --funcion sri-txt-robot \
+  --env-file ~/.sri-txt-robot/lambda.env \
+  --actualizar
 ```
 
 Solo hay que repetirlo si el portal vuelve a rechazar el captcha (por ejemplo,
@@ -550,18 +662,20 @@ repositorio (por ejemplo `~/.sri-txt-robot/perfil-linux`) y pase esa ruta a
 
 Tres detalles del entorno Lambda que el despliegue ya resuelve:
 
-- `/opt` es de solo lectura: el handler copia el perfil a `/tmp/perfil` al
-  empezar (no en el arranque, que tiene un límite de 10 s).
+- `/var/task` es de solo lectura: el bootstrap extrae el perfil y el navegador
+  a `/tmp` (no en el arranque, que tiene un límite de 10 s), y solo cuando hay
+  descargas pendientes.
 - Xvfb se arranca desde el handler y se comprueba que su socket acepta
   conexiones. Así no se reutiliza un socket huérfano si Lambda congela o
   reinicia el sandbox entre invocaciones.
-- Chrome se lanza con `--no-zygote` (`SRI_CHROME_BANDERAS` en la imagen): sin
+- Chrome se lanza con `--no-zygote` (`SRI_CHROME_BANDERAS` en la función): sin
   esa bandera el sandbox de Lambda aborta con `Zygote could not fork`.
 
-En el **modo estático**, la frecuencia por defecto es el día 5 de cada mes a
-las 13:00 UTC (08:00 de Ecuador), descargando el mes anterior. Se cambia con
-`--cron`. En el **modo dinámico** no hay regla mensual: la aplicación que
-invoca decide la frecuencia.
+En el **modo estático** (solo imagen), la frecuencia por defecto es el día 5 de
+cada mes a las 13:00 UTC (08:00 de Ecuador), descargando el mes anterior. Se
+cambia con `--cron`. En el **modo dinámico**, que es el de producción, no se
+usa la regla mensual: la aplicación que invoca decide la frecuencia. La regla
+`sri-txt-robot-mensual` sigue creada pero deshabilitada.
 
 ### Invocación manual
 
@@ -588,11 +702,115 @@ aws lambda invoke --function-name sri-txt-robot \
 El evento acepta `periodos` (lista) o `periodo` (un solo mes). Sin períodos se
 usa el mes cerrado anterior.
 
+### Callback firmado
+
+La invocación asíncrona (`InvocationType=Event`) solo devuelve un `RequestId`.
+Para saber si la descarga terminó, el robot puede enviar un `POST` firmado a un
+endpoint propio (por ejemplo `POST /webhooks/sri-robot` de `autotributo`).
+
+El evento admite dos campos opcionales:
+
+```json
+{
+  "periodo": "2026-09",
+  "event_id": "01J9Z8Q7K3",
+  "callback_url": "https://app.ejemplo.com/webhooks/sri-robot",
+  "sealed_credentials": "..."
+}
+```
+
+- `event_id` correlaciona la invocación con el callback. Si no llega, el robot
+  genera `sri-<uuid>`.
+- `callback_url` solo se acepta si su host está en
+  `SRI_CALLBACK_ALLOWED_HOSTS`. Si no, se usa `SRI_CALLBACK_URL`.
+
+Variables de entorno de la función:
+
+| Variable | Uso |
+|---|---|
+| `SRI_CALLBACK_URL` | URL por defecto. Debe ser `https` (solo se admite `http` en localhost). |
+| `SRI_CALLBACK_SECRET` | Secreto compartido, mínimo 16 caracteres. |
+| `SRI_CALLBACK_ALLOWED_HOSTS` | Hosts separados por coma que pueden venir en `callback_url`. |
+| `SRI_CALLBACK_TIMEOUT_SECONDS` | Timeout por intento (10 s por defecto). |
+| `SRI_CALLBACK_ATTEMPTS` | Intentos totales (3 por defecto). |
+| `SRI_CALLBACK_BACKOFF_SECONDS` | Espera base; se duplica en cada reintento (1 s por defecto). |
+
+Cabeceras de la petición:
+
+```text
+Content-Type: application/json
+X-Sri-Event-Id: 01J9Z8Q7K3
+X-Sri-Timestamp: 1792791111
+X-Sri-Signature: sha256=<hex>
+X-Sri-Delivery-Attempt: 1
+```
+
+La firma es `HMAC-SHA256(secreto, "{timestamp}.{cuerpo}")`, con el cuerpo
+**exacto** que se envía (bytes, sin reformatear). Cuerpo:
+
+```json
+{
+  "schema_version": 1,
+  "event_id": "01J9Z8Q7K3",
+  "event_type": "sri.robot.finished",
+  "timestamp": 1792791111,
+  "status": "completed",
+  "ambiente": "produccion",
+  "ruc": "1790012345001",
+  "periodos": ["2026-09"],
+  "request_id": "5f3c...",
+  "started_at": "2026-10-26T18:00:00+00:00",
+  "finished_at": "2026-10-26T18:01:30+00:00",
+  "duration_ms": 90000,
+  "result": {
+    "descargados": [],
+    "omitidos": [],
+    "sinDatos": [],
+    "fallos": [],
+    "totalClaves": 0
+  },
+  "error": null
+}
+```
+
+`status` es `completed` (sin fallos), `partial` (hubo fallos pero también
+progreso) o `failed` (no se descargó nada o la invocación lanzó una excepción).
+El callback se intenta también cuando no hay trabajo pendiente, para que quien
+invoca pueda cerrar su ejecución.
+
+El receptor debe:
+
+1. Verificar la firma en tiempo constante y rechazar si no coincide.
+2. Rechazar un `timestamp` fuera de una ventana (por ejemplo ±5 minutos).
+3. Deducir por `event_id` y responder `202` sin reprocesar.
+4. Responder rápido: el robot reintenta ante error de red, `408`, `425`, `429`
+   y `5xx`. Un `4xx` distinto de esos no se reintenta.
+
+Ejemplo de verificación en PHP:
+
+```php
+$cuerpo = $request->getContent();
+$timestamp = (int) $request->header('X-Sri-Timestamp');
+$firma = hash_hmac('sha256', $timestamp.'.'.$cuerpo, config('sri.robot.callback_secret'));
+
+if (! hash_equals('sha256='.$firma, (string) $request->header('X-Sri-Signature'))) {
+    abort(401, 'Firma inválida.');
+}
+
+if (abs(time() - $timestamp) > 300) {
+    abort(401, 'Callback caducado.');
+}
+```
+
+Si `SRI_CALLBACK_URL` y `SRI_CALLBACK_SECRET` no están definidos, el robot no
+envía nada y la respuesta incluye solo el resumen (comportamiento anterior).
+
 ### Coste
 
 Una ejecución mensual de ~1 minuto con 3 GB de memoria cuesta menos de un
-céntimo; el repositorio ECR (imagen de ~2 GB) ronda los 0,20 USD al mes y S3
-unos céntimos. En total, por debajo de 0,30 USD al mes para un contribuyente.
+céntimo. Sin ECR, el almacenamiento se reduce al bundle, el perfil y los TXT en
+S3: ~0,25 GB, unos 0,006 USD al mes. En total, muy por debajo de 0,05 USD al
+mes para un contribuyente.
 
 ### Alternativa: tarea programada en el Mac
 
@@ -645,6 +863,65 @@ Cada XML autorizado queda persistido por el repositorio, y el informe
 distingue `AUTORIZADO`, `EN PROCESO` (`PPR`) y `RECHAZADO`/`NAT`, que **no**
 se reintentan.
 
+### Identidad que invoca la función
+
+El despliegue se hizo con el usuario
+`arn:aws:iam::076767082111:user/sri-txt-robot-deployer`, que tiene
+`AWSLambda_FullAccess`. Esa identidad es solo para desplegar: **no** debe
+usarse como credencial de la aplicación.
+
+La identidad de ejecución de `autotributo` necesita invocar la función y leer
+la salida del robot. Política mínima (ajuste el prefijo si define
+`SRI_ROBOT_OUTPUT_PREFIX`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InvocarRobotSri",
+      "Effect": "Allow",
+      "Action": "lambda:InvokeFunction",
+      "Resource": "arn:aws:lambda:us-east-2:076767082111:function:sri-txt-robot"
+    },
+    {
+      "Sid": "LeerSalidaRobotSri",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::sri-txt-robot-076767082111-produccion/produccion/*"
+    },
+    {
+      "Sid": "ListarSalidaRobotSri",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::sri-txt-robot-076767082111-produccion",
+      "Condition": {
+        "StringLike": {"s3:prefix": ["produccion/*"]}
+      }
+    }
+  ]
+}
+```
+
+Aplíquela como política inline del usuario o rol que usa la aplicación (por
+ejemplo con `aws iam put-user-policy`). No hace falta `s3:PutObject`: el único
+que escribe en el bucket es el rol de la Lambda.
+
+Ajustes de `autotributo` para apuntar a producción:
+
+```dotenv
+SRI_ROBOT_DRIVER=lambda
+SRI_ROBOT_FUNCTION=sri-txt-robot
+SRI_ROBOT_REGION=us-east-2
+SRI_ROBOT_ENVIRONMENT=produccion
+SRI_ROBOT_OUTPUT_BUCKET=sri-txt-robot-076767082111-produccion
+SRI_ROBOT_PUBLIC_KEY=<clave pública del robot>
+```
+
+`SRI_ROBOT_CALLBACK_URL` y `SRI_ROBOT_CALLBACK_SECRET` quedan pendientes hasta
+que exista una URL pública de staging; mientras tanto, la conciliación por S3
+(F2-05) cubre el resultado.
+
 ---
 
 ## Estructura
@@ -653,23 +930,29 @@ se reintentan.
 src/sri_txt_robot/
 ├── captcha/       anti-captcha (cliente API) + inyección del token
 ├── portal/        navegación: login Keycloak, captcha, recibidos, cierre de sesión, navegador
+├── callback.py    callback firmado (HMAC) y reintentos
 ├── config.py      configuración validada con pydantic
 ├── credentials.py credenciales selladas (sodium_crypto_box_seal)
 ├── manifest.py    extracción de claves de acceso (módulo 11 del SRI)
 ├── models.py      Período, tipo de comprobante, credenciales
 ├── period.py      años disponibles y período sugerido
 ├── pipeline.py    orquestación RUC × período × tipo
+├── runtime.py     bootstrap desde S3 a /tmp (bundle y perfil)
 ├── storage.py     persistencia local o S3
 └── handler.py     entrada de AWS Lambda
 config/
 ├── robots.example.yaml   configuración con los contribuyentes
 └── selectors.yaml        selectores del portal
 deploy/
-├── Dockerfile            imagen base (Playwright + código)
-└── Dockerfile.lambda     imagen final (configuración + perfil calentado)
+├── Dockerfile.artefactos construye el bundle del navegador (AL2023)
+├── Dockerfile.calentar   contenedor con VNC para calentar el perfil
+├── Dockerfile            imagen base (flujo heredado con ECR)
+└── Dockerfile.lambda     imagen final (flujo heredado con ECR)
 scripts/
 ├── instalar.sh           crea el entorno local con un Python >= 3.12
-└── publicar.sh           publica en Lambda de forma idempotente
+├── construir_zip.sh      genera bundle, perfil y dist/funcion.zip
+├── publicar_zip.sh       despliega el ZIP (producción)
+└── publicar.sh           flujo heredado con imagen/ECR (obsoleto)
 ```
 
 ## Pruebas

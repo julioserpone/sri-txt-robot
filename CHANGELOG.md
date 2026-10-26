@@ -8,6 +8,21 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 
 ### Añadido
 
+- **Callback firmado al terminar cada invocación** (`SRI_CALLBACK_URL` +
+  `SRI_CALLBACK_SECRET`): el robot envía un `POST` con `event_id`, timestamp,
+  firma `HMAC-SHA256` en `X-Sri-Signature` y el resumen. Reintenta ante red,
+  `408`, `425`, `429` y `5xx`, y respeta el tiempo restante de la invocación.
+  Un evento puede proponer `callback_url` solo si su host está autorizado en
+  `SRI_CALLBACK_ALLOWED_HOSTS`. Desbloquea el callback firmado de
+  `autotributo` (F2-04).
+- **Arranque perezoso**: el perfil de Chrome y el bundle del navegador se
+  preparan después de comprobar la idempotencia en S3, solo si hay descargas
+  pendientes. Una invocación sin trabajo responde sin materializar el runtime.
+- **Artefactos del despliegue ZIP** (`scripts/construir_zip.sh`): bundle del
+  navegador (Chromium + Xvfb + librerías + fuentes) y paquete de la función,
+  construidos sobre la misma base AL2023 del runtime de Lambda.
+- `sri_txt_robot.runtime`: descarga desde S3, verifica SHA-256 y extrae el
+  bundle y el perfil en `/tmp` de forma atómica.
 - **Configuración por línea de comandos**: `--ruc`, `--password`, `--api-key`,
   `--perfil`, `--salida` y `--visible` sustituyen al YAML. Sin `--config` el
   robot funciona con valores por defecto (`./datos`, todos los tipos) y la
@@ -29,22 +44,23 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   disco y en S3.
 - **`storage.prefix`** queda vacío por defecto y `SRI_BUCKET` permite fijar el
   bucket en Lambda sin recompilar la imagen.
-- **Despliegue en Lambda sin Secrets Manager**: `scripts/publicar.sh` crea (si
-  faltan) bucket S3, repositorio ECR, rol IAM, función con imagen de contenedor
-  y regla mensual de EventBridge. Es idempotente: si la función ya existe no
-  toca nada salvo `--actualizar`.
+- **Despliegue en Lambda sin Secrets Manager** (`scripts/publicar_zip.sh`):
+  publica un ZIP por referencia a S3, reutiliza el rol y la clave privada de la
+  función existente y configura el runtime. Es idempotente: si la función ya
+  existe no toca nada salvo `--actualizar`. El flujo anterior con imagen de
+  contenedor y ECR (`scripts/publicar.sh`) queda obsoleto y ya no se usa.
 - **Credenciales selladas por invocación** (`sealed_credentials`): el evento
   puede traer el RUC y la clave del portal cifrados con
   `sodium_crypto_box_seal` usando la clave pública del robot. La Lambda las
   abre con `SRI_CREDENTIALS_PRIVATE_KEY`, valida que el RUC coincida con el
   exterior y ejecuta con un contribuyente dinámico. Permite varios RUC sin
-  recompilar la imagen, sin `SRI_PASSWORD` y sin AWS Secrets Manager. El modo
-  estático sigue funcionando.
+  volver a desplegar, sin `SRI_PASSWORD` y sin AWS Secrets Manager. El modo
+  estático sigue existiendo en el flujo heredado con imagen.
 - Comandos `sri-txt-robot generar-claves` y `sri-txt-robot
   sellar-credenciales` para generar el par de claves y probar el sobre.
-- `scripts/publicar.sh --dinamico` (con `--private-key-file`): publica con
-  `robots: []`, omite `SRI_PASSWORD`, deshabilita la regla mensual de
-  EventBridge y borra el JSON temporal que contiene la clave privada.
+- `scripts/publicar_zip.sh --private-key-file` (con `--env-file` para secretos
+  adicionales): publica con `robots: []`, omite `SRI_PASSWORD`, no crea la
+  regla mensual y configura `SRI_CREDENTIALS_PRIVATE_KEY`.
 - `SRI_CREDENTIALS_PRIVATE_KEY_ANTERIOR` y
   `SRI_CREDENTIALS_MAX_AGE_SECONDS` para rotar claves y limitar la antigüedad
   de los sobres.
@@ -52,11 +68,11 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   `sodium_crypto_box_seal` de PHP.
 - `deploy/Dockerfile` (Playwright + `awslambdaric`) y
   `deploy/Dockerfile.lambda` (configuración, perfil calentado y banderas de
-  Chrome para Lambda).
+  Chrome para Lambda): flujo heredado con imagen, ya no se usa.
 - `deploy/Dockerfile.calentar`: añade `x11vnc` a la imagen para calentar el
   perfil dentro de Linux una sola vez, por VNC.
-- La opción `--selectors` respeta `SRI_ROBOT_SELECTORS`, para que la imagen de
-  Lambda encuentre los selectores en `/opt/config`.
+- La opción `--selectors` respeta `SRI_ROBOT_SELECTORS`, para que la función
+  ZIP encuentre los selectores en `/var/task/config`.
 - Descarga de **varios períodos en una sola ejecución**: `-p` es repetible
   (`-p 2026-07 -p 2026-08 -p 2026-09`) y también acepta listas separadas por
   comas. El evento de Lambda acepta `periodos` (y mantiene `periodo`).
@@ -74,15 +90,43 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 - El perfil debe calentarse **dentro del contenedor Linux**
   (`deploy/Dockerfile.calentar` + VNC): el calentado en macOS no transfiere la
   confianza.
-- Chrome se lanza con `--no-zygote` (`SRI_CHROME_BANDERAS` en la imagen): el
+- Chrome se lanza con `--no-zygote` (`SRI_CHROME_BANDERAS` en la función): el
   sandbox de Lambda no permite el `fork` del zygote y el navegador abortaba con
   `Zygote could not fork` / `GPU process isn't usable`.
-- El handler copia el perfil de `/opt/perfil` a `/tmp/perfil`: en Lambda `/opt`
-  es de solo lectura y la fase de inicialización tiene un límite de 10 s, así
-  que la copia (40 MB) no puede hacerse en el arranque.
+- El runtime extrae el perfil y el navegador a `/tmp` de forma perezosa: en
+  Lambda `/var/task` es de solo lectura y la fase de inicialización tiene un
+  límite de 10 s, así que la copia no puede hacerse en el arranque.
+- **Función ZIP de producción `sri-txt-robot`** (arm64, 3008 MB, 900 s):
+  reemplazada en sitio (se eliminó la imagen y luego el repositorio ECR) y
+  validada con una descarga real de 2026-09: 44 facturas, 8.164 bytes, captcha
+  resuelto por el navegador y credenciales selladas por invocación en ~32 s.
+- **Función ZIP de prueba**: bootstrap desde S3 en ~6 s, Xvfb con keymap propio
+  y login de Chrome correctos; el callback firmado llegó a `autotributo` con
+  `202` al primer intento.
+
+### Obsoleto
+
+- `scripts/publicar.sh` (imagen de contenedor + ECR). El despliegue soportado
+  es `scripts/publicar_zip.sh`; el script heredado muestra un aviso y se niega
+  a ejecutarse salvo que se exporte `SRI_PERMITIR_PUBLICAR_IMAGEN=1`.
+
+### Eliminado
+
+- Repositorio ECR `sri-txt-robot` con la imagen `:produccion`, la función de
+  imagen original y la función de prueba `sri-txt-robot-zip`. El rollback ahora
+  consiste en volver a desplegar el ZIP.
 
 ### Corregido
 
+- **Xvfb no podía compilar el keymap en el despliegue ZIP**: el runtime de
+  Lambda no trae `xkbcomp` ni `xkeyboard-config`. El bundle ahora incluye
+  ambos y el binario de Xvfb se parchea para buscar `xkbcomp` en `/tmp/xkb`
+  (`/usr/bin` es de solo lectura allí); el bootstrap crea el enlace.
+- **Chrome abortaba en el runtime limpio de Lambda con
+  `FATAL:crypto/nss_util.cc nss_error=-5925`**: faltaban los módulos PKCS#11 de
+  NSS que Chrome carga con `dlopen` (`libsoftokn3`, `libfreebl3`,
+  `libnssckbi`…). Ahora viajan en el bundle y se resuelven por
+  `LD_LIBRARY_PATH`.
 - **La consulta tardaba 30 s de más**: `_esperar_a` usaba `time.sleep`, y en
   Playwright síncrono eso no bombea eventos, así que el escucha de respuestas
   nunca veía el envío con token y se agotaba el tiempo en cada tipo. Ahora se
