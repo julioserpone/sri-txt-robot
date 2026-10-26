@@ -30,7 +30,9 @@ import shutil
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from .callback import ConfigCallback, Notificador
 from .config import RobotConfig, RobotEntry, cargar_config
 from .credentials import (
     CredencialesError,
@@ -40,8 +42,9 @@ from .credentials import (
 )
 from .logging import obtener_logger
 from .models import Periodo, TipoComprobante
-from .pipeline import Opciones, Robot
+from .pipeline import Opciones, Resumen, Robot
 from .portal.selectors import Selectores
+from .runtime import asegurar_runtime
 from .storage import crear_almacenamiento
 
 logger = obtener_logger(__name__)
@@ -50,46 +53,92 @@ CONFIG_POR_DEFECTO = "/opt/config/robots.yaml"
 SELECTORES_POR_DEFECTO = "/opt/config/selectors.yaml"
 
 
-def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
-    """Ejecuta el robot para el período indicado en el evento."""
-    sellada = _texto(event.get("sealed_credentials"))
-    configuracion = _cargar_configuracion(validar_robots=not sellada)
-    if sellada:
-        configuracion = _aplicar_credenciales_selladas(configuracion, event, sellada)
+def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    """Ejecuta el robot y notifica el resultado por callback firmado.
 
-    _preparar_perfil(configuracion)
-    selectores = Selectores.cargar(os.environ.get("SRI_ROBOT_SELECTORS", SELECTORES_POR_DEFECTO))
-    almacenamiento = crear_almacenamiento(configuracion)
+    El perfil de Chrome (y, en el despliegue ZIP, el navegador) se prepara de
+    forma perezosa: solo cuando el pipeline detecta que hay descargas
+    pendientes. Una invocación sin trabajo responde sin materializar el
+    runtime.
+    """
+    inicio = datetime.now(tz=UTC)
+    event_id = _event_id(event)
+    notificador = _crear_notificador(event)
 
-    periodos = _periodos(event)
-    tipos = tuple(TipoComprobante.desde_codigo(codigo) for codigo in event.get("tipos", []) or [])
+    periodos: tuple[Periodo, ...] = ()
+    ambiente = ""
+    resumen: Resumen | None = None
+    error = ""
+    respuesta: dict[str, Any] = {}
 
-    robot = Robot(configuracion, selectores, almacenamiento)
-    resumen = robot.ejecutar(
-        Opciones(
-            periodos=periodos,
-            tipos=tipos,
-            ruc=_texto(event.get("ruc")),
-            forzar=bool(event.get("forzar", False)),
+    try:
+        sellada = _texto(event.get("sealed_credentials"))
+        configuracion = _cargar_configuracion(validar_robots=not sellada)
+        if sellada:
+            configuracion = _aplicar_credenciales_selladas(configuracion, event, sellada)
+
+        selectores = Selectores.cargar(os.environ.get("SRI_ROBOT_SELECTORS", SELECTORES_POR_DEFECTO))
+        almacenamiento = crear_almacenamiento(configuracion)
+
+        periodos = _periodos(event)
+        tipos = tuple(TipoComprobante.desde_codigo(codigo) for codigo in event.get("tipos", []) or [])
+        ambiente = configuracion.storage.ambiente
+
+        robot = Robot(
+            configuracion,
+            selectores,
+            almacenamiento,
+            preparar_runtime=lambda: _preparar_entorno(configuracion),
         )
-    )
+        resumen = robot.ejecutar(
+            Opciones(
+                periodos=periodos,
+                tipos=tipos,
+                ruc=_texto(event.get("ruc")),
+                forzar=bool(event.get("forzar", False)),
+            )
+        )
 
-    respuesta = {
-        "ambiente": configuracion.storage.ambiente,
-        "periodos": [periodo.clave for periodo in periodos],
-        "ejecutadoEn": datetime.now(tz=UTC).isoformat(),
-        **resumen.a_dict(),
-    }
+        respuesta.update(
+            {
+                "ambiente": ambiente,
+                "periodos": [periodo.clave for periodo in periodos],
+                "ejecutadoEn": datetime.now(tz=UTC).isoformat(),
+                **resumen.a_dict(),
+            }
+        )
 
-    logger.info(
-        "ejecución finalizada",
-        extra={
-            "ambiente": configuracion.storage.ambiente,
-            "periodos": [periodo.clave for periodo in periodos],
-            "fallos": len(resumen.fallos),
-        },
-    )
-    return respuesta
+        logger.info(
+            "ejecución finalizada",
+            extra={
+                "ambiente": ambiente,
+                "periodos": [periodo.clave for periodo in periodos],
+                "fallos": len(resumen.fallos),
+            },
+        )
+        return respuesta
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"[:500]
+        logger.exception("la ejecución terminó con error", extra={"event_id": event_id})
+        raise
+    finally:
+        if notificador is not None:
+            entrega = notificador.enviar(
+                event_id,
+                _cuerpo_callback(
+                    event_id=event_id,
+                    event=event,
+                    context=context,
+                    estado=_estado(resumen, error),
+                    ambiente=ambiente,
+                    periodos=periodos,
+                    inicio=inicio,
+                    resumen=resumen,
+                    error=error,
+                ),
+                plazo_ms=_plazo_ms(context),
+            )
+            respuesta["callback"] = entrega.a_dict()
 
 
 def _preparar_perfil(configuracion: RobotConfig) -> None:
@@ -118,6 +167,97 @@ def _preparar_perfil(configuracion: RobotConfig) -> None:
     shutil.copytree(origen, temporal, symlinks=True)
     temporal.rename(destino)
     logger.info("perfil de Chrome copiado a una ruta escribible", extra={"perfil": str(destino)})
+
+
+def _preparar_entorno(configuracion: RobotConfig) -> None:
+    """Materializa los artefactos pesados justo antes de abrir Chrome.
+
+    Se invoca desde el pipeline solo cuando hay descargas pendientes. En el
+    despliegue ZIP descarga el navegador y el perfil desde S3; en el
+    despliegue por imagen solo copia el perfil horneado en ``/opt``.
+    """
+    asegurar_runtime(configuracion)
+    _preparar_perfil(configuracion)
+
+
+def _crear_notificador(event: dict[str, Any]) -> Notificador | None:
+    """Crea el notificador si el callback está configurado."""
+    try:
+        configuracion = ConfigCallback.desde_entorno(_texto(event.get("callback_url")))
+    except ValueError as error:
+        logger.error("callback mal configurado: se omite", extra={"error": str(error)})
+        return None
+    return Notificador(configuracion) if configuracion is not None else None
+
+
+def _event_id(event: dict[str, Any]) -> str:
+    """Devuelve el ``event_id`` del evento o genera uno estable por invocación."""
+    crudo = _texto(event.get("event_id"))
+    if crudo and len(crudo) <= 128 and crudo.isprintable():
+        return crudo
+    if crudo:
+        logger.warning("event_id inválido: se genera uno nuevo", extra={"event_id": crudo[:40]})
+    return f"sri-{uuid4().hex}"
+
+
+def _estado(resumen: Resumen | None, error: str) -> str:
+    """Resume el resultado en ``completed``, ``partial`` o ``failed``."""
+    if error or resumen is None:
+        return "failed"
+    if not resumen.fallos:
+        return "completed"
+    if resumen.resultados or resumen.omitidos or resumen.sin_datos:
+        return "partial"
+    return "failed"
+
+
+def _cuerpo_callback(
+    *,
+    event_id: str,
+    event: dict[str, Any],
+    context: Any,
+    estado: str,
+    ambiente: str,
+    periodos: tuple[Periodo, ...],
+    inicio: datetime,
+    resumen: Resumen | None,
+    error: str,
+) -> dict[str, Any]:
+    """Construye el sobre JSON del callback (versión 1)."""
+    fin = datetime.now(tz=UTC)
+    return {
+        "schema_version": 1,
+        "event_id": event_id,
+        "event_type": "sri.robot.finished",
+        "status": estado,
+        "ambiente": ambiente,
+        "ruc": _texto(event.get("ruc")) or _primer_ruc(resumen),
+        "periodos": [periodo.clave for periodo in periodos],
+        "request_id": getattr(context, "aws_request_id", None),
+        "started_at": inicio.isoformat(),
+        "finished_at": fin.isoformat(),
+        "duration_ms": int((fin - inicio).total_seconds() * 1000),
+        "result": resumen.a_dict() if resumen is not None else None,
+        "error": error or None,
+    }
+
+
+def _primer_ruc(resumen: Resumen | None) -> str:
+    if resumen is not None:
+        for resultado in resumen.resultados:
+            return resultado.ruc
+    return ""
+
+
+def _plazo_ms(context: Any) -> int | None:
+    """Tiempo restante de la invocación, si el contexto lo expone."""
+    obtener = getattr(context, "get_remaining_time_in_millis", None)
+    if not callable(obtener):
+        return None
+    try:
+        return int(obtener())
+    except Exception:  # noqa: BLE001 - un contexto incompleto no debe romper el callback
+        return None
 
 
 def _aplicar_credenciales_selladas(

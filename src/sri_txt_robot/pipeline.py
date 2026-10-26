@@ -8,6 +8,7 @@ anti-captcha ni volver a golpear el portal.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,10 +85,18 @@ class Robot:
         configuracion: RobotConfig,
         selectores: Selectores,
         almacenamiento: Almacenamiento,
+        *,
+        preparar_runtime: Callable[[], None] | None = None,
     ) -> None:
         self._configuracion = configuracion
         self._selectores = selectores
         self._almacenamiento = almacenamiento
+
+        # Se ejecuta una sola vez, justo antes de abrir el navegador y solo si
+        # hay descargas pendientes. Así una invocación sin trabajo no copia el
+        # perfil ni descarga el bundle del navegador.
+        self._preparar_runtime = preparar_runtime
+        self._runtime_listo = False
 
         # La clave de anti-captcha es opcional: si el navegador resuelve el
         # captcha por su cuenta, no hace falta. Solo se exige cuando hay que
@@ -161,6 +170,7 @@ class Robot:
         if not pendientes:
             return
 
+        self._asegurar_runtime()
         estado_sesion = self._ruta_estado(ruc.ruc)
 
         try:
@@ -192,6 +202,14 @@ class Robot:
         except Exception as error:  # noqa: BLE001 - se registra y se continúa con el siguiente RUC
             logger.exception("fallo al procesar el RUC", extra={"ruc": ruc.ruc})
             resumen.fallos.append({"ruc": ruc.ruc, "error": str(error)})
+
+    def _asegurar_runtime(self) -> None:
+        """Prepara el entorno una sola vez por invocación, si hay trabajo."""
+        if self._runtime_listo:
+            return
+        if self._preparar_runtime is not None:
+            self._preparar_runtime()
+        self._runtime_listo = True
 
     def _procesar_tipo(
         self,

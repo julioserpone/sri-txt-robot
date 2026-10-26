@@ -65,7 +65,13 @@ class _RobotFalso:
 
     instancias: list[_RobotFalso] = []
 
-    def __init__(self, configuracion: RobotConfig, selectores: Any, almacenamiento: Any) -> None:
+    def __init__(
+        self,
+        configuracion: RobotConfig,
+        selectores: Any,
+        almacenamiento: Any,
+        **_opciones: Any,
+    ) -> None:
         self.configuracion = configuracion
         self.selectores = selectores
         self.almacenamiento = almacenamiento

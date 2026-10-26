@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Publica el robot en AWS Lambda (imagen de contenedor). La regla mensual de
-# EventBridge se crea solo en el modo estático.
+# OBSOLETO: publica el robot en AWS Lambda como imagen de contenedor (ECR).
+# El despliegue soportado es scripts/publicar_zip.sh (ZIP + runtime en S3).
+# El repositorio ECR de producción ya fue eliminado. Para usar este flujo
+# heredado hay que exportar SRI_PERMITIR_PUBLICAR_IMAGEN=1.
 #
 # - Idempotente: si la función ya existe no hace nada salvo que pase --actualizar.
 # - Sin AWS Secrets Manager: en el modo estático la clave del portal va como
@@ -18,6 +20,21 @@
 # Antes de ejecutarlo, el perfil de Chrome debe estar "calentado" en esta
 # máquina (sri-txt-robot calentar) porque se copia dentro de la imagen.
 set -euo pipefail
+
+cat >&2 <<'TEXTO'
+AVISO: scripts/publicar.sh está obsoleto.
+
+  El despliegue soportado es ZIP sin ECR:
+    scripts/publicar_zip.sh --funcion sri-txt-robot --actualizar
+
+  Este script crea una imagen de contenedor y un repositorio ECR que ya no
+  existen en producción. Si de verdad necesita el flujo antiguo, exporte
+  SRI_PERMITIR_PUBLICAR_IMAGEN=1.
+TEXTO
+
+if [[ "${SRI_PERMITIR_PUBLICAR_IMAGEN:-0}" != "1" ]]; then
+    exit 1
+fi
 
 cd "$(dirname "$0")/.."
 

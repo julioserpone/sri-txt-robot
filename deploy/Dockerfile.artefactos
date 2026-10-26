@@ -1,0 +1,59 @@
+# Construye los artefactos del despliegue ZIP: bundle del navegador y paquete
+# de la función. Usa la misma base que el runtime de Lambda para que las
+# librerías compartidas coincidan con glibc 2.34 de Amazon Linux 2023.
+#
+# Uso (desde la raíz del repositorio):
+#   docker build --platform linux/arm64 -f deploy/Dockerfile.artefactos \
+#     -t sri-txt-robot:artefactos .
+#   docker run --rm --platform linux/arm64 \
+#     -v "$PWD":/proyecto:ro -v "$PWD/dist":/salida sri-txt-robot:artefactos
+#
+# El script scripts/construir_zip.sh automatiza ambos pasos.
+FROM public.ecr.aws/lambda/python:3.14
+
+ARG PLAYWRIGHT_VERSION=1.64.0
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+
+# Dependencias de Chromium en la familia RHEL, más Xvfb, fuentes y las
+# herramientas de empaquetado. No se usa `playwright install --with-deps`
+# porque en AL2023 las dependencias se instalan con dnf.
+RUN dnf install -y \
+        alsa-lib \
+        atk \
+        at-spi2-atk \
+        at-spi2-core \
+        cups-libs \
+        libdrm \
+        libXcomposite \
+        libXdamage \
+        libXext \
+        libXfixes \
+        libXrandr \
+        libxkbcommon \
+        mesa-libgbm \
+        nss \
+        pango \
+        cairo \
+        libX11 \
+        xorg-x11-server-Xvfb \
+        xkeyboard-config \
+        fontconfig \
+        liberation-fonts \
+        tar \
+        gzip \
+        zip \
+        findutils \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN pip install --no-cache-dir "playwright==${PLAYWRIGHT_VERSION}" \
+    && playwright install chromium --no-shell
+
+COPY deploy/artefactos.sh /opt/artefactos.sh
+RUN chmod +x /opt/artefactos.sh
+
+ENTRYPOINT ["/bin/bash", "/opt/artefactos.sh"]

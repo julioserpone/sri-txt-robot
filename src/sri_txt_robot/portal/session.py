@@ -352,6 +352,20 @@ def _pantallas_candidatas(pantalla: str) -> tuple[str, ...]:
     return tuple(f":{actual}" for actual in range(base, base + 10))
 
 
+def _comando_xvfb(pantalla: str) -> list[str]:
+    """Comando de Xvfb, con la base de teclados del bundle si está definida.
+
+    En el despliegue ZIP ``xkeyboard-config`` no existe en el runtime de
+    Lambda. El bundle la incluye y ``SRI_XKB_DIR`` indica dónde.
+    """
+    comando = ["Xvfb"]
+    xkb = os.environ.get("SRI_XKB_DIR", "").strip()
+    if xkb:
+        comando += ["-xkbdir", xkb]
+    comando += [pantalla, "-screen", "0", "1440x900x24"]
+    return comando
+
+
 def _iniciar_xvfb(pantalla: str) -> bool:
     """Arranca Xvfb y espera a que el socket acepte conexiones."""
     Path("/tmp/.X11-unix").mkdir(parents=True, exist_ok=True)
@@ -360,7 +374,7 @@ def _iniciar_xvfb(pantalla: str) -> bool:
         prefix="sri-xvfb-", suffix=".log", delete=False
     )
     proceso = subprocess.Popen(
-        ["Xvfb", pantalla, "-screen", "0", "1440x900x24"],
+        _comando_xvfb(pantalla),
         stdout=subprocess.DEVNULL,
         stderr=registro,
         start_new_session=True,
