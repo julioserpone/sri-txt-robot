@@ -127,6 +127,10 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 
 ### Corregido
 
+- **Validado en producción (2026-07, facturas, RUC 1758871873001)**: una
+  corrida sin TXT previo descargó el TXT (33 claves) **y** los 33 XML de la
+  tabla en la misma sesión. El reintento bajó 0 XML y omitió los 33 sin volver
+  a descargar el TXT. Cada XML se verificó contra su `numeroAutorizacion`.
 - **La descarga fallaba con `No module named '.manifest'`**: `_procesar_tipo`
   importaba `extraer_claves` con `__import__(".manifest", ...)`, que en un
   paquete relativo no resuelve. Se usa el import normal `from .manifest
@@ -142,6 +146,16 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   toma de la propia fila y, solo si la fila no la expone, del TXT en el orden
   de la tabla. El índice del respaldo avanza una vez por fila para no
   desalinearse cuando una fila no tiene clave.
+- **No se leía la clave de acceso de la tabla real**: el selector buscaba el
+  texto `CLAVE_ACCESO`, que no aparece en la tabla; la clave es la 4.ª columna.
+  Ahora se usa `td:nth-child(4)` y el valor se valida contra el formato de
+  clave de acceso (49 dígitos) antes de usarlo como nombre de archivo.
+- **El paginador dejaba las filas obsoletas**: se leían todas las filas de la
+  página de una vez y, tras paginar, los elementos de la página anterior ya no
+  servían. Ahora cada fila se resuelve en el momento y se espera la respuesta
+  AJAX del paginador antes de leer la página nueva.
+- **Todos los XML se guardaban como `Factura.xml`**: el portal sugiere siempre
+  el mismo nombre, así que en disco se guarda con la clave de acceso.
 
 - **Xvfb no podía compilar el keymap en el despliegue ZIP**: el runtime de
   Lambda no trae `xkbcomp` ni `xkeyboard-config`. El bundle ahora incluye

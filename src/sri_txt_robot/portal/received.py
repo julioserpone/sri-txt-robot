@@ -573,18 +573,18 @@ def descargar_xmls_de_tabla(
     directorio = directorio_descargas or Path("/tmp/sri-downloads")
     indice_clave = 0
     for numero_pagina in range(1, paginas_max + 1):
-        filas = _localizar_filas(page, filas_selectores)
-        if not filas:
+        if not _localizar_filas(page, filas_selectores):
             break
 
         resumen.paginas_recorridas = numero_pagina
 
-        for fila in filas:
+        for indice_fila in range(_contar_filas(page, filas_selectores)):
             resumen.filas_vistas += 1
 
             key_txt = indice_clave
             if indice_clave < len(claves_txt):
                 indice_clave += 1
+            fila = _fila_por_indice(page, filas_selectores, indice_fila)
             clave_acceso = _leer_clave_de_fila(fila, clave_selectores)
             if not clave_acceso and key_txt < len(claves_txt):
                 clave_acceso = claves_txt[key_txt]
@@ -617,10 +617,12 @@ def descargar_xmls_de_tabla(
 
             directorio.mkdir(parents=True, exist_ok=True)
             try:
+                # El nombre sugerido es siempre el mismo ("Factura.xml"), así que
+                # el archivo se guarda en disco con la clave de acceso.
                 with page.expect_download(timeout=60_000) as info:
                     enlace.click(timeout=20_000)
                 descarga = info.value
-                ruta = directorio / descarga.suggested_filename
+                ruta = directorio / f"{clave_acceso}.xml"
                 descarga.save_as(str(ruta))
                 contenido = ruta.read_bytes()
                 if not contenido.strip():
@@ -643,8 +645,40 @@ def descargar_xmls_de_tabla(
     return resumen
 
 
+#: Formato de una clave de acceso ecuatoriana: 49 dígitos.
+_PATRON_CLAVE_ACCESO = re.compile(r"^\d{49}$")
+
+
+def _contar_filas(page: Page, selectores: list[str]) -> int:
+    """Cuenta las filas de la página actual de la tabla."""
+    for sel in selectores:
+        try:
+            total = page.locator(sel).count()
+            if total:
+                return total
+        except Exception:  # noqa: BLE001
+            continue
+    return 0
+
+
+def _fila_por_indice(page: Page, selectores: list[str], indice: int) -> Locator:
+    """Devuelve la fila ``indice`` de la tabla.
+
+    Se resuelve en el momento y no antes: tras paginar, los elementos de la
+    página anterior quedan obsoletos y su lectura agota el tiempo de espera.
+    """
+    for sel in selectores:
+        try:
+            fila = page.locator(sel).nth(indice)
+            if fila.count():
+                return fila
+        except Exception:  # noqa: BLE001
+            continue
+    raise ConsultaSRIError("No se pudo localizar la fila de la tabla de resultados.")
+
+
 def _localizar_filas(page: Page, selectores: list[str]) -> list[Locator]:
-    """Devuelve las filas visibles de la tabla de resultados."""
+    """Devuelve las filas de la página actual (vacío si no hay tabla)."""
     for sel in selectores:
         try:
             localizadas = page.locator(sel).all()
@@ -656,12 +690,18 @@ def _localizar_filas(page: Page, selectores: list[str]) -> list[Locator]:
 
 
 def _leer_clave_de_fila(fila: Locator, selectores: list[str]) -> str:
-    """Lee la clave de acceso de una celda de la fila."""
+    """Lee la clave de acceso de una celda de la fila.
+
+    Solo se acepta un valor con el formato de clave de acceso: la celda puede
+    contener otro dato si el portal cambia las columnas, y un nombre inventado
+    guardaría el XML de un comprobante con el nombre de otro.
+    """
     for sel in selectores:
         try:
-            celdas = fila.locator(sel).all()
-            if celdas:
-                return (celdas[0].inner_text() or "").strip()
+            for celda in fila.locator(sel).all():
+                texto = re.sub(r"\s+", "", celda.inner_text() or "")
+                if _PATRON_CLAVE_ACCESO.match(texto):
+                    return texto
         except Exception:  # noqa: BLE001
             continue
     return ""
@@ -683,6 +723,9 @@ def _ir_a_siguiente_pagina(page: Page, selectores: Selectores) -> bool:
     """Hace clic en el botón 'siguiente' del paginador.
 
     Devuelve ``False`` cuando no hay más páginas (botón desactivado o ausente).
+    Se espera a que la tabla se repinte: el paginador del portal es un postback
+    AJAX y pulsar la primera fila de la página nueva antes de tiempo agota el
+    tiempo de espera.
     """
     for sel in selectores.grupo("consulta", "paginador_desactivado"):
         try:
@@ -695,8 +738,13 @@ def _ir_a_siguiente_pagina(page: Page, selectores: Selectores) -> bool:
         try:
             boton = page.locator(sel).first
             if boton.count() > 0 and boton.is_visible() and boton.is_enabled():
-                boton.click(timeout=15_000)
-                page.wait_for_timeout(500)
+                with page.expect_response(
+                    lambda respuesta: "tablaCompRecibidos" in respuesta.url
+                    or respuesta.request.method == "POST",
+                    timeout=15_000,
+                ):
+                    boton.click(timeout=15_000)
+                page.wait_for_load_state("networkidle")
                 return True
         except Exception:  # noqa: BLE001
             continue
