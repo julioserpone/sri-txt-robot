@@ -833,6 +833,81 @@ El receptor debe:
 4. Responder rápido: el robot reintenta ante error de red, `408`, `425`, `429`
    y `5xx`. Un `4xx` distinto de esos no se reintenta.
 
+#### Reapuntar el callback cuando cambia el túnel
+
+Durante el desarrollo el receptor suele estar detrás de un túnel (Expose,
+ngrok, Cloudflare Tunnel), y su URL cambia en cada arranque. Para apuntar la
+función a la URL nueva sin tocar el resto de variables de entorno:
+
+```bash
+scripts/reapuntar_callback.sh \
+  https://abc123.sharedwithexpose.com/api/v1/webhooks/sri-robot \
+  --perfil sri-robot --region us-east-2
+```
+
+El comando muestra el resultado y espera a que Lambda aplique el cambio:
+
+```text
+SRI_CALLBACK_URL=https://abc123.sharedwithexpose.com/api/v1/webhooks/sri-robot
+SRI_CALLBACK_ALLOWED_HOSTS=abc123.sharedwithexpose.com
+listo: sri-txt-robot apunta a https://abc123.sharedwithexpose.com/api/v1/webhooks/sri-robot
+```
+
+Actualiza dos variables:
+
+- `SRI_CALLBACK_URL`: la URL completa del receptor (incluido el path).
+- `SRI_CALLBACK_ALLOWED_HOSTS`: el host de esa URL. Hace falta para que el
+  evento pueda proponer su propio `callback_url`; sin él se ignora y se usa la
+  URL de la función.
+
+Para desactivar el callback sin borrar el secreto:
+
+```bash
+scripts/reapuntar_callback.sh --quitar --perfil sri-robot
+```
+
+El script conserva todo el resto del entorno. Si prefiere hacerlo a mano,
+tenga en cuenta que `--environment` **reemplaza todas** las variables: hay que
+partir del entorno actual y volver a enviarlo completo.
+
+```bash
+# 1. Descargar el entorno actual (es el mapa de variables, sin la clave "Variables")
+aws lambda get-function-configuration --function-name sri-txt-robot \
+  --profile sri-robot --region us-east-2 \
+  --query 'Environment.Variables' --output json > /tmp/sri-env.json
+
+# 2. Cambiar las dos variables y envolver el resultado en {"Variables": ...}
+python3 - <<'PY'
+import json
+
+with open('/tmp/sri-env.json') as entrada:
+    variables = json.load(entrada)
+
+variables['SRI_CALLBACK_URL'] = 'https://abc123.sharedwithexpose.com/api/v1/webhooks/sri-robot'
+variables['SRI_CALLBACK_ALLOWED_HOSTS'] = 'abc123.sharedwithexpose.com'
+
+with open('/tmp/sri-env-nuevo.json', 'w') as salida:
+    json.dump({'Variables': variables}, salida)
+PY
+
+# 3. Aplicar
+aws lambda update-function-configuration --function-name sri-txt-robot \
+  --profile sri-robot --region us-east-2 \
+  --environment file:///tmp/sri-env-nuevo.json
+```
+
+Para comprobarlo, invoque el robot y mire el campo `callback` de la respuesta:
+
+```bash
+python3 -c "import json; print(json.load(open('out.json'))['callback'])"
+# {'enviado': True, 'intentos': 1, 'status': 202, 'error': ''}
+```
+
+Si el túnel se cae, el robot registra `callback rechazado sin reintento` con el
+`status` recibido y termina la descarga sin fallar: el callback nunca bloquea
+el trabajo.
+
+
 Ejemplo de verificación en PHP:
 
 ```php
@@ -965,9 +1040,11 @@ SRI_ROBOT_OUTPUT_BUCKET=sri-txt-robot-076767082111-produccion
 SRI_ROBOT_PUBLIC_KEY=<clave pública del robot>
 ```
 
-`SRI_ROBOT_CALLBACK_URL` y `SRI_ROBOT_CALLBACK_SECRET` quedan pendientes hasta
-que exista una URL pública de staging; mientras tanto, la conciliación por S3
-(F2-05) cubre el resultado.
+`SRI_ROBOT_CALLBACK_URL` y `SRI_ROBOT_CALLBACK_SECRET` se configuran con la URL
+pública del receptor. Durante el desarrollo puede ser un túnel cuyo nombre
+cambia en cada arranque; vea
+[Reapuntar el callback cuando cambia el túnel](#reapuntar-el-callback-cuando-cambia-el-túnel)
+para actualizarlo con un solo comando.
 
 ---
 
@@ -999,6 +1076,7 @@ scripts/
 ├── instalar.sh           crea el entorno local con un Python >= 3.12
 ├── construir_zip.sh      genera bundle, perfil y dist/funcion.zip
 ├── publicar_zip.sh       despliega el ZIP (producción)
+├── reapuntar_callback.sh apunta el callback a la URL de un túnel
 └── publicar.sh           flujo heredado con imagen/ECR (obsoleto)
 ```
 

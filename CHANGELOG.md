@@ -5,6 +5,13 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 [SemVer](https://semver.org/lang/es/).
 
 ## [Unreleased]
+### Añadido
+- **`scripts/reapuntar_callback.sh`**: cambia `SRI_CALLBACK_URL` y
+  `SRI_CALLBACK_ALLOWED_HOSTS` de la función a la URL de un túnel de desarrollo
+  conservando el resto del entorno. La URL del túnel cambia en cada arranque y
+  antes había que editar el JSON a mano. Se documenta en el README, junto con
+  la variante manual y cómo comprobar el `status` del callback.
+
 ### Corregido
 - **El perfil reutilizado invalidaba el reCAPTCHA**: tras una consulta aceptada,
   el portal deja datos en `localStorage` e `IndexedDB` de
