@@ -32,6 +32,10 @@ class Almacenamiento(Protocol):
         """Guarda un documento JSON y devuelve la clave lógica del objeto."""
         ...
 
+    def guardar_xml(self, clave: str, contenido: bytes) -> str:
+        """Guarda un archivo XML y devuelve la clave lógica del objeto."""
+        ...
+
     def existe(self, clave: str) -> bool:
         """Indica si el objeto ya fue guardado."""
         ...
@@ -60,6 +64,14 @@ class AlmacenamientoLocal:
         )
         ruta.chmod(0o600)
         logger.info("manifiesto guardado", extra={"clave": clave})
+        return clave
+
+    def guardar_xml(self, clave: str, contenido: bytes) -> str:
+        ruta = self._ruta(clave)
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_bytes(contenido)
+        ruta.chmod(0o600)
+        logger.info("XML guardado", extra={"clave": clave, "bytes": len(contenido)})
         return clave
 
     def existe(self, clave: str) -> bool:
@@ -106,6 +118,18 @@ class AlmacenamientoS3:
             ServerSideEncryption="AES256",
         )
         logger.info("manifiesto guardado en S3", extra={"clave": clave})
+        return clave
+
+    def guardar_xml(self, clave: str, contenido: bytes) -> str:
+        destino = self._destino(clave)
+        self._cliente.put_object(
+            Bucket=self._bucket,
+            Key=destino,
+            Body=contenido,
+            ContentType="application/xml; charset=utf-8",
+            ServerSideEncryption="AES256",
+        )
+        logger.info("XML guardado en S3", extra={"clave": clave, "bytes": len(contenido)})
         return clave
 
     def existe(self, clave: str) -> bool:

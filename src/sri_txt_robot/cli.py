@@ -106,6 +106,13 @@ def descargar(
         bool,
         typer.Option("--forzar", help="Vuelve a descargar aunque el TXT ya exista."),
     ] = False,
+    descargar_xmls: Annotated[
+        bool,
+        typer.Option(
+            "--descargar-xml/--no-descargar-xml",
+            help="Descarga también el XML de cada fila de la tabla de resultados (maneja paginador).",
+        ),
+    ] = True,
     log_nivel: Annotated[str, typer.Option("--log-nivel", help="Nivel de log.")] = "INFO",
 ) -> None:
     """Descarga los TXT de comprobantes recibidos."""
@@ -145,6 +152,7 @@ def descargar(
             tipos=tipos_objetivo,
             ruc=ruc or "",
             forzar=forzar,
+            descargar_xmls=descargar_xmls,
         )
     )
 

@@ -180,7 +180,7 @@ class ConfigRuc:
 
 @dataclass(frozen=True, slots=True)
 class ResultadoDescarga:
-    """Resultado de descargar el TXT de un tipo de comprobante en un período."""
+    """Resultado de descargar el TXT y los XML de un tipo de comprobante en un período."""
 
     ruc: str
     periodo: Periodo
@@ -189,6 +189,8 @@ class ResultadoDescarga:
     claves_acceso: tuple[str, ...]
     bytes_txt: int
     tarea_captcha: str = ""
+    xmls_descargados: int = 0
+    rutas_xml: tuple[str, ...] = ()
 
     @property
     def total_claves(self) -> int:
@@ -204,4 +206,6 @@ class ResultadoDescarga:
             "bytes": self.bytes_txt,
             "totalClaves": self.total_claves,
             "tareaCaptcha": self.tarea_captcha,
+            "xmlsDescargados": self.xmls_descargados,
+            "rutasXml": list(self.rutas_xml),
         }

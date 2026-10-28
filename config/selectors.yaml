@@ -143,6 +143,30 @@ consulta:
   panel_resultados:
     - '[id="frmPrincipal:panelListaComprobantes"]'
 
+  # Fila de la tabla de resultados. Cada fila representa un comprobante recibido.
+  fila_tabla:
+    - '[id="frmPrincipal:tablaCompRecibidos_data"] tr'
+    - '.ui-datatable.sri-tabla tbody tr'
+
+  # Enlace o botón "Descargar XML" dentro de una fila de la tabla.
+  # Ejemplo real: a[id="frmPrincipal:tablaCompRecibidos:0:lnkXml"] (icono xml.gif).
+  enlace_xml_fila:
+    - 'a[id*=":lnkXml"]'
+
+  # Celda con la clave de acceso (número de autorización) de la fila. En la
+  # tabla real es la 4.ª columna: N.º, RUC, comprobante, clave, fechas, valores.
+  celda_clave_acceso:
+    - 'td:nth-child(4)'
+
+  # Paginador de PrimeFaces. La tabla muestra 50 filas por página y marca el
+  # extremo con la clase ui-state-disabled: "(1 of 2)" indica que hay más.
+  paginador_siguiente:
+    - '.ui-paginator-next'
+
+  # Paginador: indica que no hay más páginas (botón desactivado).
+  paginador_desactivado:
+    - '.ui-paginator-next.ui-state-disabled'
+
 captcha:
   # reCAPTCHA Enterprise con widget invisible. La clave pública está fija en el
   # HTML de la pantalla de consulta: aparece en el `render` del script

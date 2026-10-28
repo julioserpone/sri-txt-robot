@@ -23,9 +23,11 @@ from .portal.login import iniciar_sesion
 from .portal.logout import cerrar_sesion
 from .portal.received import (
     ConsultaSRIError,
+    ResumenXml,
     SinDatosError,
     configurar_filtros,
     consultar_y_descargar,
+    descargar_xmls_de_tabla,
     navegar_a_recibidos,
 )
 from .portal.received import (
@@ -52,6 +54,7 @@ class Opciones:
     ruc: str = ""
     forzar: bool = False
     max_intentos_captcha: int = 3
+    descargar_xmls: bool = True
 
 
 @dataclass(slots=True)
@@ -149,23 +152,30 @@ class Robot:
         # Se descarta por idempotencia cada combinación período × tipo que ya
         # esté descargada, pero se abre una sola sesión para todos los períodos
         # pedidos: es más rápido y menos expuesto para el portal.
+        #
+        # Cuando se pide descargar XML, un tipo con TXT ya guardado sigue
+        # necesitando procesarse para bajar los XML que falten, pero sin
+        # volver a descargar el TXT.
         pendientes: dict[str, list[TipoComprobante]] = {}
+        txt_ya_existia: dict[tuple[str, str], bool] = {}
         for periodo in opciones.periodos:
-            faltan = [
-                tipo
-                for tipo in tipos
-                if opciones.forzar
-                or not self._almacenamiento.existe(nombre_txt(ruc.ruc, periodo.clave, tipo, ambiente=self._ambiente()))
-            ]
-            omitidos = [tipo.value for tipo in tipos if tipo not in faltan]
+            pendientes_periodo: list[TipoComprobante] = []
+            for tipo in tipos:
+                clave_txt = nombre_txt(ruc.ruc, periodo.clave, tipo, ambiente=self._ambiente())
+                ya_existia = not opciones.forzar and self._almacenamiento.existe(clave_txt)
+                txt_ya_existia[(periodo.clave, tipo.value)] = ya_existia
+                # Con el TXT guardado solo se sigue si hay que bajar XML.
+                if not ya_existia or opciones.descargar_xmls:
+                    pendientes_periodo.append(tipo)
+            omitidos = [tipo.value for tipo in tipos if tipo not in pendientes_periodo]
             if omitidos:
                 logger.info(
                     "descargas omitidas por idempotencia",
                     extra={"ruc": ruc.ruc, "periodo": periodo.clave, "tipos": omitidos},
                 )
                 resumen.omitidos.extend(f"{ruc.ruc}/{periodo.clave}/{codigo}" for codigo in omitidos)
-            if faltan:
-                pendientes[periodo.clave] = faltan
+            if pendientes_periodo:
+                pendientes[periodo.clave] = pendientes_periodo
 
         if not pendientes:
             return
@@ -192,7 +202,15 @@ class Robot:
                         if not tipos_pendientes:
                             continue
                         for tipo in tipos_pendientes:
-                            self._procesar_tipo(pagina, ruc, periodo, tipo, opciones, resumen)
+                            self._procesar_tipo(
+                                pagina,
+                                ruc,
+                                periodo,
+                                tipo,
+                                opciones,
+                                resumen,
+                                txt_ya_existia=txt_ya_existia.get((periodo.clave, tipo.value), False),
+                            )
                         self._guardar_manifiesto(ruc.ruc, periodo, resumen)
                 finally:
                     # Se cierra la sesión siempre, incluso si una descarga falló.
@@ -219,6 +237,7 @@ class Robot:
         tipo: TipoComprobante,
         opciones: Opciones,
         resumen: Resumen,
+        txt_ya_existia: bool = False,
     ) -> None:
         clave_txt = nombre_txt(ruc.ruc, periodo.clave, tipo, ambiente=self._ambiente())
         directorio = self._directorio_descargas()
@@ -233,6 +252,8 @@ class Robot:
                 ruc=ruc.credenciales.usuario_portal,
             )
 
+            # Con el TXT ya guardado no se vuelve a pedir el reporte: basta con
+            # enviar la consulta para que la tabla quede en pantalla.
             descarga: DescargaPortal = consultar_y_descargar(
                 pagina,
                 self._selectores,
@@ -240,6 +261,7 @@ class Robot:
                 self._configuracion.captcha,
                 directorio,
                 max_intentos=opciones.max_intentos_captcha,
+                descargar_txt=not txt_ya_existia,
             )
         except SinDatosError:
             logger.info(
@@ -270,6 +292,57 @@ class Robot:
             resumen.fallos.append({"ruc": ruc.ruc, "periodo": periodo.clave, "tipo": tipo.value, "error": str(error)})
             return
 
+        resumen_xml: ResumenXml | None = None
+        if opciones.descargar_xmls:
+            # Los XML se bajan con la tabla en pantalla, antes de pulsar
+            # "Descargar reporte": tras la descarga el portal puede recargar.
+            resumen_xml = descargar_xmls_de_tabla(
+                pagina,
+                self._selectores,
+                self._almacenamiento,
+                ruc.ruc,
+                periodo,
+                tipo,
+                self._ambiente(),
+                directorio_descargas=directorio,
+            )
+            resumen.fallos.extend(
+                {**fallo, "ruc": ruc.ruc, "periodo": periodo.clave, "tipo": tipo.value}
+                for fallo in resumen_xml.fallos
+            )
+            logger.info(
+                "XML de la tabla procesados",
+                extra={
+                    "ruc": ruc.ruc,
+                    "periodo": periodo.clave,
+                    "tipo": tipo.value,
+                    "paginas": resumen_xml.paginas_recorridas,
+                    "filas": resumen_xml.filas_vistas,
+                    "descargados": resumen_xml.xmls_descargados,
+                    "omitidos": resumen_xml.xmls_omitidos_existentes,
+                    "fallos": len(resumen_xml.fallos),
+                },
+            )
+
+        if txt_ya_existia:
+            # El TXT ya estaba guardado: se registran solo los XML nuevos, sin
+            # reescribir el TXT ni el JSON de claves.
+            if resumen_xml is not None and resumen_xml.xmls_descargados:
+                resumen.resultados.append(
+                    ResultadoDescarga(
+                        ruc=ruc.ruc,
+                        periodo=periodo,
+                        tipo=tipo,
+                        clave_txt=clave_txt,
+                        claves_acceso=(),
+                        bytes_txt=0,
+                        tarea_captcha=descarga.origen_captcha,
+                        xmls_descargados=resumen_xml.xmls_descargados,
+                        rutas_xml=resumen_xml.rutas_xml,
+                    )
+                )
+            return
+
         claves = extraer_claves(descarga.contenido)
 
         self._almacenamiento.guardar_txt(clave_txt, descarga.contenido)
@@ -295,6 +368,8 @@ class Robot:
             claves_acceso=claves,
             bytes_txt=len(descarga.contenido),
             tarea_captcha=descarga.origen_captcha,
+            xmls_descargados=resumen_xml.xmls_descargados if resumen_xml else 0,
+            rutas_xml=resumen_xml.rutas_xml if resumen_xml else (),
         )
         resumen.resultados.append(resultado)
 

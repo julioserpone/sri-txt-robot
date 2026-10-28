@@ -8,6 +8,15 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 
 ### Añadido
 
+- **Descarga de XML por fila de la tabla de resultados** (`--descargar-xml /
+  --no-descargar-xml`, activado por defecto): con la tabla de comprobantes
+  recibidos en pantalla, el robot recorre sus filas y descarga el XML de cada
+  comprobante, manejando el paginador para cubrir todas las páginas. Es
+  idempotente: los XML ya existentes se omiten en reintentos. Los fallos por
+  fila no abortan el proceso: el TXT se entrega igual aunque falten XML.
+  Los resultados se reflejan en `xmlsDescargados` y `rutasXml` del resumen y
+  los fallos por fila aparecen en `fallos` con `ruc`, `periodo`, `tipo` y la
+  página donde ocurrieron.
 - **Callback firmado al terminar cada invocación** (`SRI_CALLBACK_URL` +
   `SRI_CALLBACK_SECRET`): el robot envía un `POST` con `event_id`, timestamp,
   firma `HMAC-SHA256` en `X-Sri-Signature` y el resumen. Reintenta ante red,
@@ -117,6 +126,36 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   consiste en volver a desplegar el ZIP.
 
 ### Corregido
+
+- **Validado en producción (2026-07, facturas, RUC 1758871873001)**: una
+  corrida sin TXT previo descargó el TXT (33 claves) **y** los 33 XML de la
+  tabla en la misma sesión. El reintento bajó 0 XML y omitió los 33 sin volver
+  a descargar el TXT. Cada XML se verificó contra su `numeroAutorizacion`.
+- **La descarga fallaba con `No module named '.manifest'`**: `_procesar_tipo`
+  importaba `extraer_claves` con `__import__(".manifest", ...)`, que en un
+  paquete relativo no resuelve. Se usa el import normal `from .manifest
+  import extraer_claves`. El bloque además dejaba `descarga = None` cuando el
+  TXT ya existía y luego lo desempaquetaba, así que cualquier reintento sobre
+  un período ya descargado terminaba en error.
+- **Los XML se perdían al reintentar sobre un TXT ya guardado**: ahora la
+  consulta se envía igual (`consultar_y_descargar(descargar_txt=False)`) para
+  dejar la tabla en pantalla y solo se descargan los XML que falten, sin
+  reescribir el TXT ni el JSON de claves. Antes se intentaba bajar los XML sin
+  haber ejecutado nunca la consulta, así que no había tabla que recorrer.
+- **XML guardado con el nombre de otro comprobante**: la clave de acceso se
+  toma de la propia fila y, solo si la fila no la expone, del TXT en el orden
+  de la tabla. El índice del respaldo avanza una vez por fila para no
+  desalinearse cuando una fila no tiene clave.
+- **No se leía la clave de acceso de la tabla real**: el selector buscaba el
+  texto `CLAVE_ACCESO`, que no aparece en la tabla; la clave es la 4.ª columna.
+  Ahora se usa `td:nth-child(4)` y el valor se valida contra el formato de
+  clave de acceso (49 dígitos) antes de usarlo como nombre de archivo.
+- **El paginador dejaba las filas obsoletas**: se leían todas las filas de la
+  página de una vez y, tras paginar, los elementos de la página anterior ya no
+  servían. Ahora cada fila se resuelve en el momento y se espera la respuesta
+  AJAX del paginador antes de leer la página nueva.
+- **Todos los XML se guardaban como `Factura.xml`**: el portal sugiere siempre
+  el mismo nombre, así que en disco se guarda con la clave de acceso.
 
 - **Xvfb no podía compilar el keymap en el despliegue ZIP**: el runtime de
   Lambda no trae `xkbcomp` ni `xkeyboard-config`. El bundle ahora incluye
