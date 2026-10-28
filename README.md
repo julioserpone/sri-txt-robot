@@ -323,6 +323,8 @@ datos/                                   s3://<bucket>/
         └── 2026-08/                             └── 2026-08/
             ├── facturas-recibidas-2026-08.txt
             ├── facturas-recibidas-2026-08-claves.json
+            ├── facturas-recibidas-2026-08-xml/
+            │   └── <claveAcceso>.xml
             └── manifest.json
 ```
 
@@ -331,7 +333,30 @@ La clave completa es:
 ```text
 <ambiente>/<ruc>/<periodo>/<tipo>-recibidas-<periodo>.txt
 <ambiente>/<ruc>/<periodo>/<tipo>-recibidas-<periodo>-claves.json
+<ambiente>/<ruc>/<periodo>/<tipo>-recibidas-<periodo>-xml/<claveAcceso>.xml
 <ambiente>/<ruc>/<periodo>/manifest.json
+```
+
+### XML por comprobante
+
+Con `--descargar-xml` (por defecto) el robot, una vez enviada la consulta,
+recorre la tabla de comprobantes fila por fila y descarga el XML de cada uno,
+pasando el paginador si hay más de una página. Cada XML se guarda como
+`<claveAcceso>.xml` dentro de la carpeta `*-xml/` del tipo.
+
+- Es **idempotente**: si el XML ya existe no se vuelve a pedir, así que se
+  puede reintentar sin gastar anti-captcha de más.
+- Un fallo en una fila no detiene el proceso ni impide entregar el TXT; queda
+  registrado en `fallos` del resumen con `ruc`, `periodo`, `tipo`, `pagina`.
+- Si el TXT del período ya está descargado, el robot **no vuelve a bajar el
+  TXT**: envía la consulta para dejar la tabla en pantalla y solo descarga los
+  XML que falten. Use `--no-descargar-xml` para recuperar el comportamiento
+  anterior (omitir por completo lo que ya existe).
+- `--forzar` re-descarga también el TXT.
+
+```bash
+sri-txt-robot descargar -p 2026-07 --descargar-xml        # TXT + XML (por defecto)
+sri-txt-robot descargar -p 2026-07 --no-descargar-xml     # solo TXT
 ```
 
 | Tipo | Archivo |

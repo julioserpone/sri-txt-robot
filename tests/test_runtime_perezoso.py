@@ -55,7 +55,7 @@ def _ejecutar(configuracion: RobotConfig, almacenamiento: _Almacenamiento, prepa
         object(),  # type: ignore[arg-type] - no se usa: el navegador falso aborta antes
         almacenamiento,  # type: ignore[arg-type]
         preparar_runtime=lambda: preparados.append(1),
-    ).ejecutar(Opciones(periodos=(Periodo(2026, 9),), tipos=()))
+    ).ejecutar(Opciones(periodos=(Periodo(2026, 9),), tipos=(), descargar_xmls=False))
 
 
 @pytest.fixture(autouse=True)

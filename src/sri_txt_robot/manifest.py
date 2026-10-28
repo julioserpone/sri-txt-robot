@@ -135,6 +135,22 @@ def nombre_manifiesto(ruc: str, periodo: str, *, ambiente: str = AMBIENTE_POR_DE
     return f"{_carpeta(ruc, periodo, ambiente)}/manifest.json"
 
 
+def nombre_xml(
+    ruc: str,
+    periodo: str,
+    tipo: TipoComprobante,
+    clave_acceso: str,
+    *,
+    ambiente: str = AMBIENTE_POR_DEFECTO,
+) -> str:
+    """Construye la clave del XML de un comprobante recibido.
+
+    Cada XML se guarda bajo ``{ambiente}/{ruc}/{periodo}/{tipo}-recibidas-{periodo}-xml/{clave_acceso}.xml``
+    para evitar colisiones cuando hay cientos de claves en un mismo período.
+    """
+    return f"{_carpeta(ruc, periodo, ambiente)}/{tipo.slug}-recibidas-{periodo}-xml/{clave_acceso}.xml"
+
+
 def _carpeta(ruc: str, periodo: str, ambiente: str) -> str:
     """Devuelve ``ambiente/ruc/periodo`` omitiendo un ambiente vacío."""
     partes = [ambiente.strip("/ "), ruc.strip("/ "), periodo.strip("/ ")]

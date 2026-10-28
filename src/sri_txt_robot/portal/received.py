@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from playwright.sync_api import Download, Locator, Page, Response
@@ -36,7 +36,9 @@ from ..captcha.anticaptcha import AntiCaptchaClient, SolucionCaptcha
 from ..captcha.inject import enviar_consulta, resolver_captcha
 from ..config import CaptchaConfig
 from ..logging import obtener_logger
+from ..manifest import nombre_xml
 from ..models import Periodo, TipoComprobante
+from ..storage import Almacenamiento
 from .selectors import Selectores, primer_visible
 
 logger = obtener_logger(__name__)
@@ -193,6 +195,7 @@ def consultar_y_descargar(
     directorio: Path,
     *,
     max_intentos: int = 3,
+    descargar_txt: bool = True,
 ) -> ResultadoDescarga:
     """Consulta los comprobantes y descarga el reporte TXT.
 
@@ -200,6 +203,10 @@ def consultar_y_descargar(
     rechaza y hay cliente de anti-captcha, se resuelve con el servicio y se
     reintenta. Cada token dura unos dos minutos, así que se resuelve justo
     antes de enviar.
+
+    Con ``descargar_txt=False`` la consulta se envía igual, pero no se pide el
+    reporte: la tabla de resultados queda en pantalla para descargar los XML
+    fila por fila. El resultado devuelto tiene ``contenido`` vacío.
     """
     if primer_visible(page, selectores.grupo("consulta", "consultar"), timeout_ms=20_000) is None:
         raise ConsultaSRIError("No se encontró el botón 'Consultar'. Revise los selectores 'consulta.consultar'.")
@@ -237,7 +244,11 @@ def consultar_y_descargar(
         estado = _esperar_resultado(page, selectores)
 
         if estado == "ok":
-            contenido, nombre = _descargar(page, selectores, directorio)
+            # ``descargar_txt=False`` deja la tabla de resultados en pantalla
+            # (sin pedir el reporte TXT) para poder descargar el XML de cada fila.
+            contenido, nombre = b"", ""
+            if descargar_txt:
+                contenido, nombre = _descargar(page, selectores, directorio)
             if solucion is not None and cliente_captcha is not None and configuracion_captcha.report_outcomes:
                 cliente_captcha.reportar_correcto(solucion.task_id)
             return ResultadoDescarga(
@@ -513,3 +524,180 @@ def _descargar(page: Page, selectores: Selectores, directorio: Path) -> tuple[by
         raise ConsultaSRIError("El TXT descargado está vacío.")
 
     return contenido, ruta.name
+
+
+@dataclass(slots=True)
+class ResumenXml:
+    """Resultado de descargar los XML de una tabla de resultados."""
+
+    paginas_recorridas: int = 0
+    filas_vistas: int = 0
+    xmls_descargados: int = 0
+    xmls_omitidos_existentes: int = 0
+    rutas_xml: tuple[str, ...] = ()
+    fallos: list[dict[str, str]] = field(default_factory=list)
+
+
+def descargar_xmls_de_tabla(
+    page: Page,
+    selectores: Selectores,
+    almacenamiento: Almacenamiento,
+    ruc: str,
+    periodo: Periodo,
+    tipo: TipoComprobante,
+    ambiente: str,
+    *,
+    claves_txt: tuple[str, ...] = (),
+    paginas_max: int = 500,
+    directorio_descargas: Path | None = None,
+) -> ResumenXml:
+    """Descarga el XML de cada fila de la tabla de resultados, pasando el paginador.
+
+    Reutiliza las claves de acceso extraídas del TXT como respaldo cuando la
+    fila no expone su propia clave. Cada XML ya existente se omite (idempotencia)
+    para que un reintento no vuelva a descargarlo. Los fallos por fila se
+    registran y no abortan el proceso: el TXT se entrega igual aunque falten XML.
+
+    La clave para nombrar el XML se toma de la propia fila (así no se desalinea
+    al paginar); ``claves_txt`` es solo el respaldo en el orden de la tabla.
+    """
+    resumen = ResumenXml()
+    filas_selectores = selectores.grupo("consulta", "fila_tabla")
+    enlace_selectores = selectores.grupo("consulta", "enlace_xml_fila")
+    clave_selectores = selectores.grupo("consulta", "celda_clave_acceso")
+
+    if not filas_selectores:
+        logger.debug("sin selectores de fila de tabla; no se descargan XML")
+        return resumen
+
+    directorio = directorio_descargas or Path("/tmp/sri-downloads")
+    indice_clave = 0
+    for numero_pagina in range(1, paginas_max + 1):
+        filas = _localizar_filas(page, filas_selectores)
+        if not filas:
+            break
+
+        resumen.paginas_recorridas = numero_pagina
+
+        for fila in filas:
+            resumen.filas_vistas += 1
+
+            key_txt = indice_clave
+            if indice_clave < len(claves_txt):
+                indice_clave += 1
+            clave_acceso = _leer_clave_de_fila(fila, clave_selectores)
+            if not clave_acceso and key_txt < len(claves_txt):
+                clave_acceso = claves_txt[key_txt]
+            if not clave_acceso:
+                # Sin clave no se puede nombrar el XML de esta fila.
+                resumen.fallos.append(
+                    {
+                        "fila": str(resumen.filas_vistas),
+                        "pagina": str(numero_pagina),
+                        "error": "no se leyó la clave de acceso",
+                    }
+                )
+                continue
+
+            clave_logica = nombre_xml(ruc, periodo.clave, tipo, clave_acceso, ambiente=ambiente)
+            if almacenamiento.existe(clave_logica):
+                resumen.xmls_omitidos_existentes += 1
+                continue
+
+            enlace = _localizar_enlace_xml(fila, enlace_selectores)
+            if enlace is None:
+                resumen.fallos.append(
+                    {
+                        "clave": clave_acceso,
+                        "pagina": str(numero_pagina),
+                        "error": "no se encontró el enlace de XML",
+                    }
+                )
+                continue
+
+            directorio.mkdir(parents=True, exist_ok=True)
+            try:
+                with page.expect_download(timeout=60_000) as info:
+                    enlace.click(timeout=20_000)
+                descarga = info.value
+                ruta = directorio / descarga.suggested_filename
+                descarga.save_as(str(ruta))
+                contenido = ruta.read_bytes()
+                if not contenido.strip():
+                    raise ConsultaSRIError("XML descargado vacío")
+                almacenamiento.guardar_xml(clave_logica, contenido)
+                resumen.xmls_descargados += 1
+                resumen.rutas_xml = (*resumen.rutas_xml, clave_logica)
+            except Exception as error:  # noqa: BLE001 - un fallo por fila no detiene el resto
+                logger.warning(
+                    "fallo al descargar XML de fila",
+                    extra={"clave": clave_acceso, "pagina": numero_pagina, "error": str(error)},
+                )
+                resumen.fallos.append(
+                    {"clave": clave_acceso, "pagina": str(numero_pagina), "error": str(error)}
+                )
+
+        if not _ir_a_siguiente_pagina(page, selectores):
+            break
+
+    return resumen
+
+
+def _localizar_filas(page: Page, selectores: list[str]) -> list[Locator]:
+    """Devuelve las filas visibles de la tabla de resultados."""
+    for sel in selectores:
+        try:
+            localizadas = page.locator(sel).all()
+            if localizadas:
+                return localizadas
+        except Exception:  # noqa: BLE001
+            continue
+    return []
+
+
+def _leer_clave_de_fila(fila: Locator, selectores: list[str]) -> str:
+    """Lee la clave de acceso de una celda de la fila."""
+    for sel in selectores:
+        try:
+            celdas = fila.locator(sel).all()
+            if celdas:
+                return (celdas[0].inner_text() or "").strip()
+        except Exception:  # noqa: BLE001
+            continue
+    return ""
+
+
+def _localizar_enlace_xml(fila: Locator, selectores: list[str]) -> Locator | None:
+    """Devuelve el enlace/botón de descarga de XML dentro de una fila."""
+    for sel in selectores:
+        try:
+            candidato = fila.locator(sel).first
+            if candidato.count() > 0 and candidato.is_visible():
+                return candidato
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _ir_a_siguiente_pagina(page: Page, selectores: Selectores) -> bool:
+    """Hace clic en el botón 'siguiente' del paginador.
+
+    Devuelve ``False`` cuando no hay más páginas (botón desactivado o ausente).
+    """
+    for sel in selectores.grupo("consulta", "paginador_desactivado"):
+        try:
+            if page.locator(sel).count() > 0 and page.locator(sel).first.is_visible():
+                return False
+        except Exception:  # noqa: BLE001
+            continue
+
+    for sel in selectores.grupo("consulta", "paginador_siguiente"):
+        try:
+            boton = page.locator(sel).first
+            if boton.count() > 0 and boton.is_visible() and boton.is_enabled():
+                boton.click(timeout=15_000)
+                page.wait_for_timeout(500)
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
