@@ -11,13 +11,14 @@ Hallazgos verificados contra el portal real (octubre de 2026):
   ``rcBuscar()``.
 * El servidor valida el token con el endpoint de reCAPTCHA **v2**: un token v3
   generado con ``grecaptcha.enterprise.execute({action})`` se rechaza con "No
-  se pudo validar el captcha en google". Por eso la tarea de anti-captcha debe
-  ser ``RecaptchaV2EnterpriseTaskProxyless``.
+  se pudo validar el captcha en google".
 
-Flujo del robot: obtener el token, escribirlo en los campos
-``g-recaptcha-response*``, neutralizar ``grecaptcha`` para que la página no lo
-sobrescriba y llamar a ``rcBuscar()``, que es exactamente lo que hace el
-portal cuando el captcha se resuelve.
+Flujo del robot: dejar que el widget invisible del portal genere el token en
+este navegador. ``inyectar_token`` solo escribe el campo
+``g-recaptcha-response``; no sustituye las funciones de ``grecaptcha`` porque el
+portal las vuelve a ejecutar y Google emitiría otro token. Un token pedido a
+anti-captcha se puede inyectar, pero el SRI lo rechaza al validarlo contra el
+navegador que hace la consulta.
 """
 
 from __future__ import annotations
@@ -132,9 +133,16 @@ def es_enterprise(page: Page) -> bool:
 
 
 def inyectar_token(page: Page, token: str) -> bool:
-    """Escribe el token en el formulario y neutraliza la validación del widget.
+    """Escribe el token en el formulario, sin tocar el widget de Google.
 
     Devuelve ``True`` si se encontró al menos un campo ``g-recaptcha-response``.
+
+    No se sustituyen ``grecaptcha.getResponse``, ``reset`` ni ``execute``: el
+    portal recarga el widget con ``grecaptcha.enterprise.execute`` dentro de
+    ``onSubmit`` y, si esas funciones devuelven el token ajeno, Google genera un
+    token de verdad **después** de la inyección. El servidor del SRI recibe el
+    token del navegador (el que el portal rechaza) y responde "Captcha
+    incorrecta", aunque el cuerpo del POST lleve el token inyectado.
     """
     return bool(page.evaluate(_JS_INYECTAR, token))
 
@@ -161,7 +169,12 @@ def resolver_captcha(
     sitekey_respaldo: str = "",
     accion_respaldo: str = "",
 ) -> SolucionCaptcha:
-    """Resuelve el reCAPTCHA de la página actual y devuelve el token."""
+    """Resuelve el reCAPTCHA con anti-captcha y devuelve el token.
+
+    Se conserva para usos puntuales (por ejemplo el comando de calibración),
+    pero no forma parte de la descarga: el SRI solo acepta el token que genera
+    el navegador que hace la consulta.
+    """
     sitekey = detectar_sitekey(page) or sitekey_respaldo
     if not sitekey:
         raise RuntimeError("No se encontró la clave pública del reCAPTCHA en la página de consulta.")
@@ -228,20 +241,6 @@ _JS_INYECTAR = """(token) => {
             encontrado = true;
         }
 
-        // El widget de Google mantiene su propio token y lo reinicia al
-        // expirar. Se sustituyen sus funciones para que la página no lo
-        // sobrescriba con una cadena vacía.
-        const fijar = (objeto) => {
-            if (!objeto) return;
-            try { objeto.getResponse = () => token; } catch (e) { /* noop */ }
-            try { objeto.reset = () => {}; } catch (e) { /* noop */ }
-            try { objeto.execute = () => Promise.resolve(token); } catch (e) { /* noop */ }
-            try { objeto.ready = (cb) => { try { cb(); } catch (e) { /* noop */ } }; } catch (e) { /* noop */ }
-        };
-        fijar(window.grecaptcha);
-        if (window.grecaptcha && window.grecaptcha.enterprise) {
-            fijar(window.grecaptcha.enterprise);
-        }
         return encontrado;
     }""".replace("__CAMPO_TOKEN__", _CAMPO_TOKEN)
 

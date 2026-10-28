@@ -192,13 +192,34 @@ echo "== subiendo runtime a s3://$BUCKET =="
 "${AWS[@]}" s3 cp "$CODIGO" "s3://$BUCKET/$CODIGO_KEY" --only-show-errors
 
 ENTORNO="$(mktemp)"
+EXISTENTE_ENV=""
 limpiar() {
     rm -f "$ENTORNO"
+    if [[ -n "$EXISTENTE_ENV" ]]; then
+        rm -f "$EXISTENTE_ENV"
+    fi
     if [[ "$PRIVADA_TEMPORAL" -eq 1 ]]; then
         rm -f "$PRIVADA_ARCHIVO"
     fi
 }
 trap limpiar EXIT
+
+EXISTE_FUNCION=0
+if "${AWS[@]}" lambda get-function --function-name "$FUNCION" >/dev/null 2>&1; then
+    EXISTE_FUNCION=1
+    if [[ "$ACTUALIZAR" -eq 0 ]]; then
+        echo "La función $FUNCION ya existe. Use --actualizar para redesplegarla." >&2
+        exit 1
+    fi
+    # Al actualizar, se conservan las variables que no vienen en los argumentos
+    # (callback firmado, claves propias, etc.). Antes se reemplazaba todo el
+    # entorno y un redespliegue sin --callback-url borraba el callback.
+    EXISTENTE_ENV="$(mktemp)"
+    "${AWS[@]}" lambda get-function-configuration \
+        --function-name "$FUNCION" \
+        --query 'Environment.Variables' \
+        --output json > "$EXISTENTE_ENV"
+fi
 
 SRI_PRIVADA="$CLAVE_PRIVADA" \
 SRI_CALLBACK_URL_ENV="$CALLBACK_URL" \
@@ -211,27 +232,37 @@ SRI_BUNDLE_SHA_ENV="$BUNDLE_SHA" \
 SRI_PERFIL_KEY_ENV="$PERFIL_KEY" \
 SRI_PERFIL_SHA_ENV="$PERFIL_SHA" \
 SRI_EXTRA_ENV_FILE_ENV="$ARCHIVO_ENTORNO" \
+SRI_EXISTENTE_ENV_FILE_ENV="$EXISTENTE_ENV" \
 python3 - "$ENTORNO" <<'PY'
 import json
 import os
 import sys
 
-variables = {
-    "SRI_BUCKET": os.environ["SRI_BUCKET_ENV"],
-    "SRI_AMBIENTE": os.environ["SRI_AMBIENTE_ENV"],
-    "SRI_ROBOT_CONFIG": "/var/task/config/robots.yaml",
-    "SRI_ROBOT_SELECTORS": "/var/task/config/selectors.yaml",
-    "SRI_CREDENTIALS_PRIVATE_KEY": os.environ["SRI_PRIVADA"],
-    "SRI_CREDENTIALS_MAX_AGE_SECONDS": "86400",
-    "SRI_RUNTIME_BUCKET": os.environ["SRI_BUCKET_ENV"],
-    "SRI_RUNTIME_BROWSER_KEY": os.environ["SRI_BUNDLE_KEY_ENV"],
-    "SRI_RUNTIME_BROWSER_SHA256": os.environ["SRI_BUNDLE_SHA_ENV"],
-    "SRI_RUNTIME_PERFIL_KEY": os.environ["SRI_PERFIL_KEY_ENV"],
-    "SRI_RUNTIME_PERFIL_SHA256": os.environ["SRI_PERFIL_SHA_ENV"],
-    "DISPLAY": ":99",
-    "SRI_ASEGURAR_XVFB": "1",
-    "SRI_CHROME_BANDERAS": "--no-zygote",
-}
+# Variables que ya tenía la función y que este despliegue no especifica.
+variables: dict[str, str] = {}
+existente = os.environ.get("SRI_EXISTENTE_ENV_FILE_ENV", "").strip()
+if existente:
+    with open(existente, encoding="utf-8") as archivo:
+        variables.update(json.load(archivo) or {})
+
+variables.update(
+    {
+        "SRI_BUCKET": os.environ["SRI_BUCKET_ENV"],
+        "SRI_AMBIENTE": os.environ["SRI_AMBIENTE_ENV"],
+        "SRI_ROBOT_CONFIG": "/var/task/config/robots.yaml",
+        "SRI_ROBOT_SELECTORS": "/var/task/config/selectors.yaml",
+        "SRI_CREDENTIALS_PRIVATE_KEY": os.environ["SRI_PRIVADA"],
+        "SRI_CREDENTIALS_MAX_AGE_SECONDS": "86400",
+        "SRI_RUNTIME_BUCKET": os.environ["SRI_BUCKET_ENV"],
+        "SRI_RUNTIME_BROWSER_KEY": os.environ["SRI_BUNDLE_KEY_ENV"],
+        "SRI_RUNTIME_BROWSER_SHA256": os.environ["SRI_BUNDLE_SHA_ENV"],
+        "SRI_RUNTIME_PERFIL_KEY": os.environ["SRI_PERFIL_KEY_ENV"],
+        "SRI_RUNTIME_PERFIL_SHA256": os.environ["SRI_PERFIL_SHA_ENV"],
+        "DISPLAY": ":99",
+        "SRI_ASEGURAR_XVFB": "1",
+        "SRI_CHROME_BANDERAS": "--no-zygote",
+    }
+)
 
 if os.environ.get("SRI_CALLBACK_URL_ENV"):
     variables["SRI_CALLBACK_URL"] = os.environ["SRI_CALLBACK_URL_ENV"]
@@ -258,11 +289,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as archivo:
     json.dump({"Variables": variables}, archivo)
 PY
 
-if "${AWS[@]}" lambda get-function --function-name "$FUNCION" >/dev/null 2>&1; then
-    if [[ "$ACTUALIZAR" -eq 0 ]]; then
-        echo "La función $FUNCION ya existe. Use --actualizar para redesplegarla." >&2
-        exit 1
-    fi
+if [[ "$EXISTE_FUNCION" -eq 1 ]]; then
     echo "== actualizando $FUNCION =="
     "${AWS[@]}" lambda update-function-code \
         --function-name "$FUNCION" \

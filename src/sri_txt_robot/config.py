@@ -25,11 +25,9 @@ class _Base(BaseModel):
 class CaptchaConfig(_Base):
     """Parámetros del resolvedor de reCAPTCHA (anti-captcha).
 
-    Los tipos de tarea se prueban en orden. En el portal del SRI el widget es
-    **reCAPTCHA Enterprise invisible** y el servidor valida el token con el
-    endpoint de reCAPTCHA v2: un token v3 generado con
-    ``grecaptcha.enterprise.execute({action})`` se rechaza con "No se pudo
-    validar el captcha en google". Por eso los tipos V2 Enterprise van primero.
+    La descarga ya no usa anti-captcha: el SRI solo acepta el token que genera
+    el navegador que hace la consulta. Esta configuración se conserva para el
+    comando ``saldo`` y para usos puntuales de ``resolver_captcha``.
     """
 
     api_url: str = "https://api.anti-captcha.com"
@@ -45,10 +43,15 @@ class CaptchaConfig(_Base):
     poll_timeout_seconds: float = 180.0
     report_outcomes: bool = True
 
-    #: Intentar primero que el propio navegador resuelva el captcha. En un
-    #: Chromium con sesión real suele funcionar y no cuesta nada; si el portal
-    #: lo rechaza, se recurre a anti-captcha.
+    #: Se conserva por compatibilidad con las configuraciones existentes. La
+    #: descarga ignora este valor: siempre usa el token del navegador.
     intentar_en_navegador: bool = True
+
+    @field_validator("api_key_env", mode="before")
+    @classmethod
+    def _normalizar_api_key_env(cls, valor: Any) -> str:
+        # Un espacio pegado al copiar la variable hacía que nunca se encontrara.
+        return str(valor or "").strip()
 
     def resolver_api_key(self) -> str:
         """Devuelve la clave del servicio, priorizando la variable de entorno."""

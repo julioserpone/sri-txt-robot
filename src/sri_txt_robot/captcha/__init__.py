@@ -1,4 +1,4 @@
-"""Resolución de reCAPTCHA con anti-captcha."""
+"""Cliente heredado de anti-captcha y utilidades de inyección del token."""
 
 from __future__ import annotations
 

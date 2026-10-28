@@ -2,8 +2,8 @@
 
 El robot es **idempotente**: si el TXT de una combinación ya existe en el
 almacenamiento, no se vuelve a descargar salvo que se fuerce. Esto permite
-reintentar la invocación tras un fallo parcial sin duplicar gastos de
-anti-captcha ni volver a golpear el portal.
+reintentar la invocación tras un fallo parcial sin repetir consultas ni volver
+a golpear el portal.
 """
 
 from __future__ import annotations
@@ -14,8 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .captcha.anticaptcha import AntiCaptchaClient
-from .config import ConfigError, RobotConfig
+from .config import RobotConfig
 from .logging import obtener_logger
 from .manifest import extraer_claves, nombre_claves, nombre_manifiesto, nombre_txt
 from .models import ConfigRuc, Periodo, ResultadoDescarga, TipoComprobante
@@ -43,6 +42,26 @@ logger = obtener_logger(__name__)
 def _ahora() -> str:
     """Marca de tiempo ISO-8601 en UTC."""
     return datetime.now(tz=UTC).isoformat()
+
+
+def _fusionar_descargas(
+    anteriores: dict[str, Any] | None,
+    nuevas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Combina las descargas del manifiesto previo con las de esta ejecución.
+
+    Queda una entrada por tipo de comprobante y gana la más reciente, que es la
+    de ``nuevas``. Así una ejecución que no descarga nada (porque todo estaba en
+    S3) no borra el detalle de lo que sí se guardó antes.
+    """
+    por_tipo: dict[str, dict[str, Any]] = {}
+    for descarga in (anteriores or {}).get("descargas", []):
+        if isinstance(descarga, dict) and descarga.get("tipo"):
+            por_tipo[str(descarga["tipo"])] = descarga
+    for descarga in nuevas:
+        if descarga.get("tipo"):
+            por_tipo[str(descarga["tipo"])] = descarga
+    return [por_tipo[tipo] for tipo in sorted(por_tipo)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,22 +119,6 @@ class Robot:
         # perfil ni descarga el bundle del navegador.
         self._preparar_runtime = preparar_runtime
         self._runtime_listo = False
-
-        # La clave de anti-captcha es opcional: si el navegador resuelve el
-        # captcha por su cuenta, no hace falta. Solo se exige cuando hay que
-        # recurrir al servicio.
-        try:
-            clave_captcha = configuracion.captcha.resolver_api_key()
-        except ConfigError:
-            clave_captcha = ""
-            logger.warning(
-                "sin clave de anti-captcha: solo se intentará el captcha del navegador",
-                extra={"variable": configuracion.captcha.api_key_env},
-            )
-
-        self._cliente_captcha = (
-            AntiCaptchaClient(clave_captcha, api_url=configuracion.captcha.api_url) if clave_captcha else None
-        )
 
     def ejecutar(self, opciones: Opciones) -> Resumen:
         """Ejecuta el robot para todos los RUC configurados."""
@@ -257,8 +260,6 @@ class Robot:
             descarga: DescargaPortal = consultar_y_descargar(
                 pagina,
                 self._selectores,
-                self._cliente_captcha,
-                self._configuracion.captcha,
                 directorio,
                 max_intentos=opciones.max_intentos_captcha,
                 descargar_txt=not txt_ya_existia,
@@ -385,14 +386,21 @@ class Robot:
         )
 
     def _guardar_manifiesto(self, ruc: str, periodo: Periodo, resumen: Resumen) -> None:
-        """Guarda el manifiesto del período con el detalle de las descargas."""
-        descargas = [
+        """Guarda el manifiesto del período con el detalle de las descargas.
+
+        Se combina con el manifiesto anterior: una ejecución idempotente no
+        vuelve a descargar lo que ya está en S3 y, sin la fusión, el manifiesto
+        se reescribía vacío y se perdía el detalle de lo descargado antes.
+        """
+        clave = nombre_manifiesto(ruc, periodo.clave, ambiente=self._ambiente())
+        nuevas = [
             resultado.a_dict()
             for resultado in resumen.resultados
             if resultado.ruc == ruc and resultado.periodo.clave == periodo.clave
         ]
+        descargas = _fusionar_descargas(self._almacenamiento.leer_json(clave), nuevas)
         self._almacenamiento.guardar_json(
-            nombre_manifiesto(ruc, periodo.clave, ambiente=self._ambiente()),
+            clave,
             {
                 "ambiente": self._ambiente(),
                 "ruc": ruc,

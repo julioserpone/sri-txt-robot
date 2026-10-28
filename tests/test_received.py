@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -59,3 +60,107 @@ def test_ajustar_ruc_rellena_si_el_campo_esta_habilitado() -> None:
     _ajustar_ruc(cast(Locator, campo), RUC)
 
     assert campo.escrito == RUC
+
+
+# -- Detección del envío con token y clasificación del resultado -----------
+
+
+def _respuesta(url: str, cuerpo: str, *, metodo: str = "POST") -> object:
+    """Doble mínimo de ``Response`` con la petición que disparó el postback."""
+    from types import SimpleNamespace
+
+    peticion = SimpleNamespace(method=metodo, url=url, post_data=cuerpo)
+    return SimpleNamespace(request=peticion)
+
+
+JSF = "https://srienlinea.sri.gob.ec/comprobantes-electronicos-internet/pages/consultas/recibidos/comprobantesRecibidos.jsf"
+
+
+def test_solo_cuenta_el_envio_con_token_real() -> None:
+    """El primer envío del portal lleva ``g-recaptcha-response`` vacío."""
+    from sri_txt_robot.portal.received import _es_consulta_con_token
+
+    sin_token = _respuesta(JSF, "frmPrincipal=principal&g-recaptcha-response=&frmPrincipal%3Aano=2026")
+    con_token = _respuesta(JSF, "frmPrincipal=principal&g-recaptcha-response=03AGdBq2" + "x" * 2400)
+
+    assert _es_consulta_con_token(cast(object, sin_token)) is False
+    assert _es_consulta_con_token(cast(object, con_token)) is True
+
+
+def test_no_cuenta_una_peticion_que_no_es_la_consulta() -> None:
+    from sri_txt_robot.portal.received import _es_consulta_con_token
+
+    otra = _respuesta("https://srienlinea.sri.gob.ec/otra.jsf", "g-recaptcha-response=" + "x" * 100)
+    get = _respuesta(JSF, "g-recaptcha-response=" + "x" * 100, metodo="GET")
+
+    assert _es_consulta_con_token(cast(object, otra)) is False
+    assert _es_consulta_con_token(cast(object, get)) is False
+
+
+def test_clasifica_la_fecha_futura_como_error_de_fecha() -> None:
+    from sri_txt_robot.portal.received import _clasificar_mensaje
+
+    assert _clasificar_mensaje("la fecha ingresada debe ser menor a la fecha actual") == "error_fecha"
+
+
+def test_una_fecha_rechazada_no_reintenta_el_captcha(monkeypatch: pytest.MonkeyPatch) -> None:
+    """El aviso de fecha no se confunde con un captcha rechazado."""
+    from pathlib import Path
+
+    from sri_txt_robot.portal import received
+
+    monkeypatch.setattr(received, "primer_visible", lambda *_a, **_k: object())
+    monkeypatch.setattr(received, "_esperar_resultado", lambda *_a, **_k: "error_fecha")
+    llamadas: list[int] = []
+
+    def pulsar(*_args, **_kwargs) -> str:
+        llamadas.append(1)
+        return "boton"
+
+    monkeypatch.setattr(received, "_pulsar_consultar", pulsar)
+
+    with pytest.raises(ConsultaSRIError, match="fecha"):
+        received.consultar_y_descargar(
+            cast(object, object()),
+            _selectores_falsos(),
+            Path("/tmp/sri-test-fecha"),
+        )
+
+    assert llamadas == [1], "un rechazo de fecha no debe reintentar"
+
+
+def _selectores_falsos() -> object:
+    """Doble de ``Selectores`` con los grupos que usa la consulta."""
+    return SimpleNamespace(grupo=lambda *_a, **_k: [], valor=lambda *_a, **_k: "")
+
+
+def test_tras_un_rechazo_se_vuelve_a_pulsar_consultar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cada intento pide un token nuevo al widget del navegador."""
+    from pathlib import Path
+
+    from sri_txt_robot.portal import received
+    from sri_txt_robot.portal.received import ResultadoDescarga
+
+    monkeypatch.setattr(received, "primer_visible", lambda *_a, **_k: object())
+    intentos: list[str] = []
+
+    def pulsar(*_args, **_kwargs) -> str:
+        intentos.append("navegador")
+        return "boton"
+
+    def resultado(*_args, **_kwargs) -> str:
+        return "captcha" if len(intentos) == 1 else "ok"
+
+    monkeypatch.setattr(received, "_pulsar_consultar", pulsar)
+    monkeypatch.setattr(received, "_esperar_resultado", resultado)
+    monkeypatch.setattr(received, "_descargar", lambda *_a, **_k: (b"CLAVE", "f.txt"))
+
+    salida = received.consultar_y_descargar(
+        cast(object, SimpleNamespace(url="https://srienlinea.sri.gob.ec/comprobantes")),
+        _selectores_falsos(),
+        Path("/tmp/sri-test-reintento"),
+    )
+
+    assert isinstance(salida, ResultadoDescarga)
+    assert intentos == ["navegador", "navegador"]
+    assert salida.origen_captcha == "navegador"

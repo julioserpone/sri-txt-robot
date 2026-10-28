@@ -32,6 +32,10 @@ class Almacenamiento(Protocol):
         """Guarda un documento JSON y devuelve la clave lógica del objeto."""
         ...
 
+    def leer_json(self, clave: str) -> dict[str, Any] | None:
+        """Devuelve el JSON guardado o ``None`` si no existe o está corrupto."""
+        ...
+
     def guardar_xml(self, clave: str, contenido: bytes) -> str:
         """Guarda un archivo XML y devuelve la clave lógica del objeto."""
         ...
@@ -65,6 +69,17 @@ class AlmacenamientoLocal:
         ruta.chmod(0o600)
         logger.info("manifiesto guardado", extra={"clave": clave})
         return clave
+
+    def leer_json(self, clave: str) -> dict[str, Any] | None:
+        ruta = self._ruta(clave)
+        if not ruta.is_file():
+            return None
+        try:
+            datos = json.loads(ruta.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            logger.warning("JSON ilegible: se ignora", extra={"clave": clave})
+            return None
+        return datos if isinstance(datos, dict) else None
 
     def guardar_xml(self, clave: str, contenido: bytes) -> str:
         ruta = self._ruta(clave)
@@ -119,6 +134,22 @@ class AlmacenamientoS3:
         )
         logger.info("manifiesto guardado en S3", extra={"clave": clave})
         return clave
+
+    def leer_json(self, clave: str) -> dict[str, Any] | None:
+        from botocore.exceptions import ClientError
+
+        try:
+            objeto = self._cliente.get_object(Bucket=self._bucket, Key=self._destino(clave))
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                return None
+            raise
+        try:
+            datos = json.loads(objeto["Body"].read().decode("utf-8"))
+        except (json.JSONDecodeError, KeyError):
+            logger.warning("JSON ilegible en S3: se ignora", extra={"clave": clave})
+            return None
+        return datos if isinstance(datos, dict) else None
 
     def guardar_xml(self, clave: str, contenido: bytes) -> str:
         destino = self._destino(clave)
