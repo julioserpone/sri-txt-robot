@@ -3,10 +3,10 @@
 [![CI](https://github.com/julioserpone/sri-txt-robot/actions/workflows/ci.yml/badge.svg)](https://github.com/julioserpone/sri-txt-robot/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Robot que entra al portal del SRI, resuelve el reCAPTCHA (primero con el propio
-navegador, con **anti-captcha** como respaldo), consulta los comprobantes
-electrónicos **recibidos** de uno o varios meses y descarga el reporte **TXT**
-de cada tipo de comprobante. Al terminar, cierra la sesión.
+Robot que entra al portal del SRI, resuelve el reCAPTCHA con el propio
+navegador, consulta los comprobantes electrónicos **recibidos** de uno o varios
+meses y descarga el reporte **TXT** de cada tipo de comprobante. Al terminar,
+cierra la sesión.
 
 Es la pieza que falta entre el portal del SRI y el paquete
 [`sri-comprobantes-php`](https://github.com/julioserpone/sri-comprobantes-php):
@@ -39,7 +39,8 @@ octubre de 2026:
 | --- | --- |
 | **Login** | Keycloak en `/tuportal-internet/`; acción `/auth/realms/Internet/login-actions/authenticate`. Campos `usuario` (RUC de 13 dígitos), `ciAdicional` (opcional) y `password`. **El login no tiene reCAPTCHA.** |
 | **Sesión** | La app JSF (`/comprobantes-electronicos-internet/pages/consultas/recibidos/comprobantesRecibidos.jsf`) **no** se puede abrir por su URL limpia con la sesión iniciada: exige el token de un solo uso que entrega `/tuportal-internet/accederAplicacion.jspa?redireccion=57&idGrupo=55` y, si falta, devuelve al formulario de Keycloak. El robot usa esa URL de entrada. |
-| **Captcha** | reCAPTCHA **Enterprise invisible v2**. La clave pública sí está fija en el HTML: `6LdukTQsAAAAAIcciM4GZq4ibeyplUhmWvlScuQE`, con acción `consulta_cel_recibidos`. El servidor valida el token con semántica **v2**: un token v3 (`grecaptcha.enterprise.execute({action})`) se rechaza con *"No se pudo validar el captcha en google"*. |
+| **Captcha** | reCAPTCHA **Enterprise invisible**. La clave pública sí está fija en el HTML: `6LdukTQsAAAAAIcciM4GZq4ibeyplUhmWvlScuQE`, con acción `consulta_cel_recibidos`. El servidor solo acepta el token que genera el navegador que hace la consulta; los tokens de anti-captcha se rechazan con `Captcha incorrecta` (probado con v2 Enterprise, v2 y v3). El `onclick` de **Consultar** hace dos envíos: el primero con `g-recaptcha-response` vacío y el segundo con el token real. |
+| **Período** | Acepta meses anteriores **y el mes en curso** (con el día en **Todos**). Un día posterior a hoy o un período futuro se rechaza con *"la fecha ingresada debe ser menor a la fecha actual"*. |
 | **Pantalla** | *Facturación Electrónica → Comprobantes electrónicos recibidos*. Filtros: *Periodo de emisión* (año, mes, día — con **Todos** para el mes completo) y *Tipo de comprobante*. Acciones: **Consultar** (dispara el captcha) y **Descargar reporte** (entrega el TXT). |
 | **Salida** | El TXT lista los comprobantes con su *Clave de acceso (CA)* de 49 dígitos. |
 | **Histórico** | **No hay ventana de 5 días**: en octubre de 2026 se descargaron TXT de septiembre de 2026 y de enero de 2022 sin problema. |
@@ -47,14 +48,20 @@ octubre de 2026:
 ### Sobre la supuesta ventana de 5 días
 
 El manual del portal menciona un plazo para el reporte, pero la consulta real
-**no lo aplica**: el robot descarga meses cerrados y meses de años anteriores.
+**no lo aplica**: el robot descarga el mes en curso y meses de años anteriores.
 Por eso `period.py` no bloquea períodos antiguos; solo valida que el año exista
-en el desplegable (`2022`–`2026` en la última revisión) y sugiere el mes cerrado
+en el desplegable (`2022`–`2026` en la última revisión) y sugiere el mes
 anterior cuando no se indica ninguno.
 
 El trabajo suele ser mensual (EventBridge en el modo estático; en el modo
 dinámico lo agenda la aplicación que invoca), pero ya no es obligatorio
 ejecutarlo en los primeros días del mes: sirve también para recuperar históricos.
+
+El único límite está en el día: si se elige un día posterior a hoy, el portal
+responde *"la fecha ingresada debe ser menor a la fecha actual"* y el robot lo
+informa como fallo sin reintentar (`error_fecha`). Con el día en **Todos** el
+mes en curso se descarga sin problema, así que el período sugerido por defecto
+es el mes anterior solo por prudencia, no porque el portal lo exija.
 
 ---
 
@@ -65,8 +72,8 @@ ejecutarlo en los primeros días del mes: sirve también para recuperar históri
 | Alternativa | Por qué no |
 | --- | --- |
 | **PHP** (extensión del paquete) | No hay un controlador de navegador headless en PHP con la madurez de Playwright: `chrome-php/chrome` habla CDP a pelo y Symfony Panther arrastra Symfony. Además, atar el paquete a la UI del portal contradice el ADR 0003. |
-| Node / TypeScript | Válido (Playwright es TS-first), pero Python tiene SDK oficial de anti-captcha, mejor tooling de datos para el parseo del TXT y `httpx`/`pydantic` más sobrios para un servicio de esta forma. |
-| **Python 3.12+ + Playwright** ✅ | Playwright resuelve los problemas reales de una app JSF: estado de vista, sesión y descarga de archivos. Auto-espera, sin *sleeps*. El SDK oficial de anti-captcha. Y `boto3`/`httpx`/`pydantic` cubren el resto sin tirar de frameworks. |
+| Node / TypeScript | Válido (Playwright es TS-first), pero Python tiene mejores herramientas de datos para el parseo del TXT y `httpx`/`pydantic` más sobrios para un servicio de esta forma. |
+| **Python 3.12+ + Playwright** ✅ | Playwright resuelve los problemas reales de una app JSF: estado de vista, sesión y descarga de archivos. Auto-espera, sin *sleeps*. Y `boto3`/`httpx`/`pydantic` cubren el resto sin tirar de frameworks. |
 
 El paquete PHP **no se toca** para esto: sigue siendo la capa de integración
 con los WSDL oficiales. La frontera entre ambos es un archivo (el TXT o su
@@ -78,7 +85,7 @@ manifiesto JSON de claves).
   perfil. 12 invocaciones al año cuestan céntimos, frente a ~USD 15-20/mes de
   una instancia EC2 siempre encendida.
 - El paquete es un **ZIP** de ~51 MB (149 MB descomprimido), no una imagen de
-  contenedor. Chromium, Xvfb, sus dependencias de sistema y el perfil calentado
+  contenedor. Chromium, Xvfb, sus dependencias de sistema y el perfil de Chrome
   viven en un prefijo privado de S3 y se extraen a `/tmp` **solo cuando la
   invocación tiene descargas pendientes**. Así no hace falta ECR y el
   almacenamiento baja a ~0,25 GB.
@@ -104,15 +111,22 @@ manifiesto JSON de claves).
 
 - **Idempotencia:** si el TXT de una combinación RUC × período × tipo ya existe,
   no se vuelve a descargar. Reintentar la invocación tras un fallo parcial no
-  duplica gasto de anti-captcha ni golpea otra vez al portal.
+  duplica trabajo ni golpea otra vez al portal.
 - **Selectores externalizados:** todo selector vive en `config/selectors.yaml`
   como lista de alternativas. Un cambio del portal se corrige en el YAML, sin
   tocar código.
-- **Reintento del captcha:** cada token vive ~2 minutos. Si el portal lo
-  rechaza, el robot resuelve uno nuevo y reintenta (3 intentos por defecto).
-- **Inyección en dos niveles:** el token se escribe en el campo
-  `g-recaptcha-response` **y** se sustituye `grecaptcha.getResponse()`, para
-  cubrir tanto la lectura en servidor como la lectura por JavaScript.
+- **Reintento del captcha:** el token lo genera el widget invisible del
+  navegador al pulsar **Consultar**. Si el portal lo rechaza, se vuelve a pulsar
+  y se reintenta (3 intentos por defecto).
+- **Por qué no anti-captcha:** Google valida el token contra el navegador que
+  hace la consulta, así que un token pedido al servicio se inyecta pero el SRI
+  responde `Captcha incorrecta` (probado con v2 Enterprise, v2 y v3 en
+  octubre de 2026). Solo funciona el token generado en el propio navegador.
+- **Perfil sin estado envenenado:** el perfil dedicado guarda `localStorage` e
+  `IndexedDB` del portal que, tras una consulta aceptada, hacen que la
+  siguiente sesión reciba tokens que el SRI rechaza. Al abrir el perfil, el
+  robot limpia esas dos bases para el origen del portal (sin tocar las cookies)
+  y cada ejecución parte de un estado válido.
 - **Sesión persistente:** se guarda el `storage_state` (cookies) por RUC para
   no iniciar sesión en cada ejecución. Solo se reutiliza si la pestaña quedó en
   una página real del portal; un `about:blank` o una página de error de Chromium
@@ -198,30 +212,19 @@ El RUC puede ser la **cédula de 10 dígitos**: el robot la completa con `001`
 para el login y acepta tanto la cédula como el RUC de 13 dígitos en el filtro
 de consulta del portal.
 
-### 3. Calentar el perfil de Chrome
+### 3. Perfil de Chrome (opcional)
 
-El reCAPTCHA Enterprise del portal solo acepta tokens de un navegador que ya
-haya recibido **una consulta hecha por una persona**. Un perfil recién creado,
-aunque el robot haga clic con eventos reales (`isTrusted`, `userActivation`),
-recibe siempre `Captcha incorrecta`.
+Sin configuración adicional, el robot usa el Chromium de Playwright. Si define
+`portal.perfil_dir` (o pasa `--perfil`), lanza una copia de Google Chrome con
+un perfil **dedicado** y se conecta por CDP. Ese modo es el recomendado para
+producción porque el navegador se ve como un Chrome normal.
 
-El flujo tiene dos pasos y solo el primero necesita intervención:
-
-```bash
-# 1) Una sola vez: abre Chrome con el perfil dedicado y espera tu consulta
-sri-txt-robot calentar --ruc 1758871873001 --perfil ~/.sri-txt-robot/perfil
-```
-
-Si omite `--password`, el comando pide la clave de forma oculta. También puede
-pasarla en el mismo comando (`--password '...'`), aunque quedará en el
-historial del shell.
-
-En la ventana que se abre: elija un mes cerrado, deje el día en **Todos**,
-pulse **Consultar** a mano y espere los resultados. El comando termina solo y
-deja el perfil habilitado.
+No hace falta "calentar" el perfil a mano: el robot resuelve el reCAPTCHA con
+el propio navegador y, al abrir el perfil, limpia el estado local del portal
+(`localStorage` e `IndexedDB`) que invalidaba el captcha en ejecuciones
+posteriores.
 
 ```bash
-# 2) A partir de aquí, todo automático
 sri-txt-robot descargar \
   --ruc 1758871873001 \
   --perfil ~/.sri-txt-robot/perfil \
@@ -230,21 +233,35 @@ sri-txt-robot descargar \
   -t 01
 ```
 
-`--salida ./datos` cambia la carpeta de los TXT y `--api-key` define la clave
-de anti-captcha si algún día hace falta.
+El comando `calentar` sigue disponible como diagnóstico: abre el perfil, deja
+el formulario listo y espera a que una persona pulse **Consultar**. Úselo si el
+portal rechaza el captcha de forma persistente o para comprobar el login y los
+selectores:
+
+```bash
+sri-txt-robot calentar --ruc 1758871873001 --perfil ~/.sri-txt-robot/perfil
+```
+
+Si omite `--password`, el comando pide la clave de forma oculta. En la ventana,
+pulse **Consultar** y espere los resultados; el comando termina solo y solo
+informa "perfil calentado" si el portal aceptó esa consulta.
+
+`--salida ./datos` cambia la carpeta de los TXT.
 
 Detalles que importan:
 
 - `portal.perfil_dir` debe apuntar a una carpeta **dedicada** (por ejemplo
   `~/.sri-txt-robot/perfil`), nunca al perfil personal de Chrome.
 - El robot lanza Chrome **sin** las banderas de automatización de Playwright
-  (`--enable-automation`, `--remote-debugging-pipe`) y se conecta por CDP. Con
-  esas banderas el portal rechaza incluso un perfil ya calentado.
-- Este modo necesita una ventana visible: en macOS `headless` se ignora.
-- Si el portal vuelve a responder `Captcha incorrecta` (por ejemplo tras muchos
-  días o un cambio de red), repita `calentar`.
-- anti-captcha queda solo como respaldo opcional: el portal rechazó todos sus
-  tokens en las pruebas de octubre de 2026.
+  (`--enable-automation`, `--remote-debugging-pipe`) y se conecta por CDP.
+- Este modo necesita una ventana visible: el reCAPTCHA no se resuelve en un
+  navegador headless identificable. En macOS `headless` se ignora; en Linux use
+  `--visible` con un `DISPLAY` real (Xvfb).
+- Si aun así el portal responde `Captcha incorrecta`, ejecute `calentar` con el
+  mismo perfil para validarlo manualmente.
+- anti-captcha no se usa en la descarga: el portal rechazó todos sus tokens en
+  las pruebas de octubre de 2026. `captcha.*` y `--api-key` se conservan solo
+  para el comando `saldo` y usos puntuales.
 
 ### 4. Calibrar contra el portal real
 
@@ -345,7 +362,7 @@ pasando el paginador si hay más de una página. Cada XML se guarda como
 `<claveAcceso>.xml` dentro de la carpeta `*-xml/` del tipo.
 
 - Es **idempotente**: si el XML ya existe no se vuelve a pedir, así que se
-  puede reintentar sin gastar anti-captcha de más.
+  puede reintentar sin repetir consultas de más.
 - Un fallo en una fila no detiene el proceso ni impide entregar el TXT; queda
   registrado en `fallos` del resumen con `ruc`, `periodo`, `tipo`, `pagina`.
 - Si el TXT del período ya está descargado, el robot **no vuelve a bajar el
@@ -398,11 +415,12 @@ $clave = "produccion/{$ruc}/{$periodo}/facturas-recibidas-{$periodo}-claves.json
 
 > **Estado (oct-2026): validado de extremo a extremo en Lambda (ZIP).**
 > El captcha lo resuelve el propio navegador, sin anti-captcha: 44 claves en
-> 2026-09 y 24 en 2026-08, en ejecuciones de 29-60 s. La clave está en calentar
-> el perfil **dentro de Linux** (el perfil calentado en macOS no transfiere la
-> confianza) y en lanzar Chrome con `--no-zygote`, porque el sandbox de Lambda
-> no permite el `fork` del zygote. La función de producción `sri-txt-robot`
-> corre como ZIP arm64, 3008 MB y 900 s.
+> 2026-09 y 24 en 2026-08, en ejecuciones de 29-60 s. El robot limpia el estado
+> local del portal al abrir el perfil, así que no hace falta calentarlo a mano;
+> el perfil debe ser de Linux (los perfiles de Chrome no son portables entre
+> sistemas) y Chrome se lanza con `--no-zygote`, porque el sandbox de Lambda no
+> permite el `fork` del zygote. La función de producción `sri-txt-robot` corre
+> como ZIP arm64, 3008 MB y 900 s.
 
 El robot corre en **Lambda con paquete ZIP** (el navegador se sirve desde S3),
 guarda los TXT en S3 y tiene dos modos de credenciales:
@@ -441,8 +459,9 @@ El script pide la clave de forma oculta (o `--password '...'`) y es
 
 Lo que publica:
 
-- `deploy/build/perfil`: copia del perfil de Chrome calentado (se quitan los
-  `Singleton*`, que en Linux hacen que Chrome crea que el perfil está en uso).
+- `deploy/build/perfil`: copia de un perfil de Chrome dedicado para Linux (se
+  quitan los `Singleton*`, que en Linux hacen que Chrome crea que el perfil
+  está en uso).
 - `deploy/build/config/robots.yaml`: RUC y `password_env: SRI_PASSWORD`.
 - Variables de la función: `SRI_PASSWORD`, `SRI_AMBIENTE`, `SRI_BUCKET`.
 
@@ -625,7 +644,7 @@ Variables que configura el script:
 | Variable | Uso |
 |---|---|
 | `SRI_RUNTIME_BUCKET`, `SRI_RUNTIME_BROWSER_KEY/SHA256` | Bundle del navegador. |
-| `SRI_RUNTIME_PERFIL_KEY/SHA256` | Perfil calentado. |
+| `SRI_RUNTIME_PERFIL_KEY/SHA256` | Perfil de Chrome para Linux. |
 | `SRI_ROBOT_CONFIG`, `SRI_ROBOT_SELECTORS` | Configuración bajo `/var/task/config`. |
 | `DISPLAY`, `SRI_ASEGURAR_XVFB`, `SRI_CHROME_BANDERAS` | Xvfb y banderas de Chrome. |
 
@@ -647,11 +666,13 @@ callback `failed` llegó firmado al endpoint de `autotributo` con `202` en el
 primer intento durante esa validación. La URL pública de callback todavía no
 está configurada en producción; actualícela con `--actualizar` cuando exista.
 
-### Calentar el perfil dentro de Linux
+### Crear el perfil de Chrome para Linux
 
-El perfil calentado en macOS **no** sirve en Linux: el portal rechaza el
-reCAPTCHA porque la confianza está atada al navegador donde se resolvió. Hay que
-calentarlo una vez dentro del mismo contenedor que se usa en Lambda:
+Los perfiles de Chrome no son portables entre macOS y Linux (rutas, bloqueos y
+datos del llavero), así que para Lambda se crea uno dentro de Linux con el
+mismo contenedor. El robot limpia el estado local del portal al abrirlo, así que
+no hace falta "calentarlo" con una consulta manual; el contenedor sirve para
+crear el perfil y, si el portal rechaza el captcha, para validarlo a mano.
 
 ```bash
 # Imagen con VNC sobre la imagen de Playwright
@@ -669,8 +690,9 @@ docker run --rm -p 127.0.0.1:5900:5900 \
 ```
 
 Desde el Finder: `Cmd+K` → `vnc://127.0.0.1:5900`, contraseña `srirobot-2026`.
-Elija un mes cerrado, día **Todos**, pulse **Consultar** y espere la tabla. El
-comando termina solo y deja el perfil en `deploy/build/perfil`; después:
+El formulario ya viene con el mes cerrado anterior y el día **Todos**: pulse
+**Consultar** y espere la tabla. El comando termina solo y deja el perfil en
+`deploy/build/perfil`; después:
 
 ```bash
 ./scripts/construir_zip.sh --ambiente produccion
@@ -680,8 +702,8 @@ AWS_PROFILE=sri-robot ./scripts/publicar_zip.sh \
   --actualizar
 ```
 
-Solo hay que repetirlo si el portal vuelve a rechazar el captcha (por ejemplo,
-tras muchos meses o un cambio de infraestructura). Guarde el perfil fuera del
+Solo hay que repetirlo si cambia la versión de Chrome o si el portal vuelve a
+rechazar el captcha de forma persistente. Guarde el perfil fuera del
 repositorio (por ejemplo `~/.sri-txt-robot/perfil-linux`) y pase esa ruta a
 `--perfil`; contiene cookies de sesión y no debe versionarse.
 
@@ -1004,13 +1026,13 @@ el comando `calibrar` con un RUC de pruebas.
   verificador módulo 11 (el mismo algoritmo de la ficha técnica v2.34 que usa
   `AccessKeyGenerator`), **no** en posiciones fijas de columna, porque el SRI no
   publica el formato del TXT.
-- El robot no descarga los XML: eso lo hace el paquete PHP contra la API
-  oficial, una clave a la vez.
-- El reCAPTCHA Enterprise está **atado al navegador donde se calentó** el
-  perfil. Medido en oct-2026: el mismo perfil copiado a un contenedor Linux
-  (con Xvfb, Chrome "con ventana" y la misma IP de salida) es rechazado, y
-  anti-captcha tampoco obtiene tokens válidos para este portal. El camino
-  probado es ejecutar el robot en el mismo Mac donde se calentó el perfil.
+- El robot puede descargar los XML de cada fila (`--descargar-xml`, activado
+  por defecto); el paquete PHP sigue siendo la vía oficial para consultar el
+  XML autorizado por clave.
+- El perfil de Chrome acumula en `localStorage` e `IndexedDB` un estado del
+  portal que, tras una consulta aceptada, hace que la siguiente sesión reciba
+  tokens rechazados. El robot limpia esas dos bases al abrir el perfil; si aun
+  así el portal rechaza el captcha, valide el perfil con `calentar`.
 
 ## Consideraciones legales
 

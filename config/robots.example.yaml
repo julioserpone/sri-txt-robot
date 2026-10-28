@@ -11,17 +11,13 @@
 version: 1
 
 captcha:
-  # Clave de anti-captcha. Por defecto se lee de la variable de entorno
-  # indicada en 'api_key_env'.
+  # Configuración heredada de anti-captcha. La descarga ya no la usa: el SRI
+  # solo acepta el token que genera el navegador que hace la consulta. Se
+  # conserva para el comando `saldo` y para usos puntuales.
   api_url: "https://api.anti-captcha.com"
+  # Nombre de la variable de entorno con la clave (no la clave).
   api_key_env: "ANTICAPTCHA_API_KEY"
-  # Tipos de tarea a probar, en orden de preferencia. El robot usa el primero
-  # que devuelva un token válido.
-  #
-  # El portal del SRI usa un widget de reCAPTCHA Enterprise *invisible* y valida
-  # el token como reCAPTCHA v2: un token v3 (generado con
-  # `grecaptcha.enterprise.execute({action})`) se rechaza con "No se pudo
-  # validar el captcha en google". Por eso los tipos V2 Enterprise van primero.
+  # Tipos de tarea a probar, en orden de preferencia.
   task_types:
     - "RecaptchaV2EnterpriseTaskProxyless"
     - "RecaptchaV2TaskProxyless"
@@ -30,9 +26,7 @@ captcha:
   poll_interval_seconds: 3
   poll_timeout_seconds: 180
   report_outcomes: true
-  # Intentar primero que el propio navegador resuelva el captcha. En un
-  # Chromium con sesión real suele funcionar y no cuesta nada; si el portal lo
-  # rechaza, se recurre a anti-captcha.
+  # Se conserva por compatibilidad; la descarga siempre usa el navegador.
   intentar_en_navegador: true
 
 portal:
@@ -57,11 +51,9 @@ portal:
   # lanza Chromium con sus banderas de automatización). Si lo define, el robot
   # arranca Chrome SIN esas banderas y se conecta por CDP.
   #
-  # El portal solo acepta el reCAPTCHA de un perfil que ya recibió una consulta
-  # hecha por una persona. El flujo es:
-  #   1) sri-txt-robot calentar     (abra Chrome, haga una consulta a mano)
-  #   2) sri-txt-robot descargar -p 2026-07 -p 2026-08 -p 2026-09
-  # Con el perfil caliente, las descargas son completamente automáticas.
+  # El robot resuelve el reCAPTCHA con el propio navegador y limpia al abrir el
+  # perfil el estado local del portal que invalidaba el captcha. No hace falta
+  # calentarlo a mano; `calentar` queda como diagnóstico.
   # En macOS este modo necesita una ventana visible: 'headless' se ignora.
   perfil_dir: ""
   # Ruta al ejecutable de Chrome. Vacío = detección automática (macOS:

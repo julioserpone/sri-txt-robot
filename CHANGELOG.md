@@ -5,6 +5,35 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 [SemVer](https://semver.org/lang/es/).
 
 ## [Unreleased]
+### Corregido
+- **El perfil reutilizado invalidaba el reCAPTCHA**: tras una consulta aceptada,
+  el portal deja datos en `localStorage` e `IndexedDB` de
+  `https://srienlinea.sri.gob.ec`; en la siguiente sesión Google emitía tokens
+  que el SRI rechazaba con `Captcha incorrecta`, aunque el token se generara
+  recién en el navegador. Ahora `Navegador` limpia esas dos bases para el
+  origen del portal al abrir un perfil dedicado, antes de iniciar sesión. Borrar
+  solo cookies, solo `localStorage` o solo `IndexedDB` no bastaba.
+- **El mes en curso sí se descarga**: el portal acepta el mes actual con el día
+  en **Todos** (verificado con 2026-10). Se retiró el aviso preventivo de
+  "meses cerrados"; el rechazo real es un día posterior a hoy o un período
+  futuro (`la fecha ingresada debe ser menor a la fecha actual`).
+- **El token de anti-captcha no sirve para este portal**: Google valida el token
+  de reCAPTCHA contra el navegador que hace la consulta, así que un token
+  pedido a anti-captcha (v2 Enterprise, v2 o v3) se inyecta en el formulario
+  pero el SRI responde `Captcha incorrecta`. La descarga usa únicamente el flujo
+  del portal (pulsar **Consultar** y dejar que el widget invisible genere el
+  token); `anti-captcha` ya no se consulta ni se configura para descargar.
+- **Un redespliegue borraba el callback firmado**: `scripts/publicar_zip.sh
+  --actualizar` reemplazaba todo el entorno de la función, así que un
+  redespliegue sin `--callback-url` dejaba la función sin `SRI_CALLBACK_URL` ni
+  `SRI_CALLBACK_SECRET`. Ahora conserva las variables existentes que el comando
+  no especifica.
+- **La inyección neutralizaba el widget y tapaba el error real**: se
+  sustituían `grecaptcha.getResponse/reset/execute`, de modo que el portal
+  recargaba el widget, recibía el token ajeno de `getResponse()` y Google
+  generaba un token de verdad por debajo; el servidor validaba ese otro token y
+  el cuerpo del POST parecía correcto. Ahora `inyectar_token` solo escribe el
+  campo `g-recaptcha-response`.
 
 ### Añadido
 
@@ -36,13 +65,13 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   `--perfil`, `--salida` y `--visible` sustituyen al YAML. Sin `--config` el
   robot funciona con valores por defecto (`./datos`, todos los tipos) y la
   clave se pregunta de forma oculta si no se pasa `--password`.
-- **Perfil de Chrome dedicado y calentado** (`portal.perfil_dir`): el portal
-  solo acepta el reCAPTCHA de un perfil que ya recibió una consulta hecha por
-  una persona. El robot lanza Chrome sin las banderas de automatización de
-  Playwright y se conecta por CDP, así que después de un clic manual todas las
-  descargas son automáticas.
-- Comando `sri-txt-robot calentar`: abre el perfil dedicado, espera la consulta
-  manual y lo deja habilitado.
+- **Perfil de Chrome dedicado** (`portal.perfil_dir`): el robot lanza Chrome sin
+  las banderas de automatización de Playwright y se conecta por CDP. Al abrirlo
+  limpia el estado local del portal que invalidaba el reCAPTCHA, así que las
+  descargas son automáticas sin un calentamiento manual previo.
+- Comando `sri-txt-robot calentar`: abre el perfil dedicado, deja el formulario
+  listo y espera una consulta manual. Sirve como diagnóstico para validar el
+  perfil o el login cuando el portal rechaza el captcha.
 - **`scripts/instalar.sh`**: elige un Python ≥ 3.12, recrea `.venv` con
   `--clear` e instala con `python -m pip`, de modo que no se mezclen
   intérpretes.
@@ -87,8 +116,9 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   comas. El evento de Lambda acepta `periodos` (y mantiene `periodo`).
 - **Cierre de sesión** al terminar todas las descargas, desde el menú superior
   derecho del portal, incluso si algún período falló.
-- El robot intenta primero el captcha con el propio navegador y solo recurre a
-  anti-captcha si el portal lo rechaza.
+- El robot resuelve el captcha únicamente con el propio navegador. El perfil
+  reutilizado acumulaba estado local del portal que invalidaba el token; ahora
+  se limpia (`localStorage` e `IndexedDB`) al abrir el perfil.
 
 ### Validado en AWS (oct-2026)
 
@@ -96,9 +126,10 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   anti-captcha (44 claves en 2026-09 y 24 en 2026-08, ejecuciones de 45-60 s
   con 3 GB). Funciona con la sesión de Keycloak caducada: el login se hace solo
   y la confianza del reCAPTCHA sigue vigente.
-- El perfil debe calentarse **dentro del contenedor Linux**
-  (`deploy/Dockerfile.calentar` + VNC): el calentado en macOS no transfiere la
-  confianza.
+- El perfil de Chrome para Lambda se crea **dentro del contenedor Linux**
+  (`deploy/Dockerfile.calentar` + VNC) porque los perfiles no son portables
+  entre sistemas; el robot limpia el estado local del portal al abrirlo, así que
+  no hace falta una consulta manual previa.
 - Chrome se lanza con `--no-zygote` (`SRI_CHROME_BANDERAS` en la función): el
   sandbox de Lambda no permite el `fork` del zygote y el navegador abortaba con
   `Zygote could not fork` / `GPU process isn't usable`.
@@ -127,6 +158,29 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
 
 ### Corregido
 
+- **`--headless` con el perfil dedicado ahora avisa**: Chromium en headless se
+  anuncia como `HeadlessChrome` y el portal rechaza su token; antes solo se
+  advertía en macOS.
+- **El robot daba la consulta por fallida aunque el portal la aceptara**: el
+  `onclick` de **Consultar** hace dos envíos, el primero con
+  `g-recaptcha-response` **vacío** y el segundo con el token real. La espera se
+  quedaba con el primero (solo comprobaba que el campo existiera) y leía su
+  rechazo, así que el log mostraba `captcha rechazado` en cada intento. Ahora
+  se espera el envío con un token no vacío.
+- **Un mes en curso se reportaba como captcha inválido**: el portal responde
+  "la fecha ingresada debe ser menor a la fecha actual" y el robot lo
+  clasificaba como captcha y reintentaba. Hay un estado propio (`error_fecha`)
+  y no se reintenta; el mes en curso con el día en *Todos* sí se descarga.
+- **Sin clave de anti-captcha, el segundo intento ya no se cortaba**: se
+  volvía a usar el navegador (token nuevo) en vez de abortar con "Defina
+  ANTICAPTCHA_API_KEY".
+- **`calentar` decía "perfil calentado" sin una consulta aceptada**: ahora
+  preselecciona el mes cerrado anterior con el día *Todos* y solo termina bien
+  si el portal devuelve filas o "no existen datos"; un rechazo se informa y el
+  comando sale con error.
+- **`captcha.api_key_env` con la clave en vez del nombre de la variable**
+  dejaba el robot sin anti-captcha en silencio; además se recortan los espacios
+  del nombre de la variable.
 - **Validado en producción (2026-07, facturas, RUC 1758871873001)**: una
   corrida sin TXT previo descargó el TXT (33 claves) **y** los 33 XML de la
   tabla en la misma sesión. El reintento bajó 0 XML y omitió los 33 sin volver
