@@ -69,6 +69,42 @@ USER_AGENT_POR_DEFECTO = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 )
 
+#: Origen del portal cuyo estado local invalida el reCAPTCHA en la siguiente
+#: sesión. Tras una consulta aceptada, el portal deja datos en ``localStorage``
+#: e ``IndexedDB`` que hacen que Google emita tokens que el SRI rechaza con
+#: "Captcha incorrecta". Limpiarlos al abrir el perfil devuelve el flujo a la
+#: normalidad; borrar solo cookies o solo una de las dos bases no basta.
+ORIGEN_PORTAL = "https://srienlinea.sri.gob.ec"
+
+#: Tipos de almacenamiento que hay que limpiar en :data:`ORIGEN_PORTAL`.
+TIPOS_ESTADO_CAPTCHA = "local_storage,indexeddb"
+
+
+def limpiar_estado_captcha(contexto: BrowserContext, pagina: Page) -> None:
+    """Borra el estado local del portal que invalida el reCAPTCHA.
+
+    Se ejecuta al abrir un perfil dedicado, antes de iniciar sesión. No toca las
+    cookies: la sesión de Keycloak se conserva y, si hace falta, el robot vuelve
+    a autenticarse como siempre.
+
+    Un fallo al limpiar no debe impedir la descarga: se registra y se sigue, de
+    modo que un CDP que no exponga ``Storage`` solo deja el comportamiento
+    anterior.
+    """
+    try:
+        cdp = contexto.new_cdp_session(pagina)
+        try:
+            cdp.send(
+                "Storage.clearDataForOrigin",
+                {"origin": ORIGEN_PORTAL, "storageTypes": TIPOS_ESTADO_CAPTCHA},
+            )
+            logger.debug("estado local del portal limpiado", extra={"origen": ORIGEN_PORTAL})
+        finally:
+            with contextlib.suppress(Exception):
+                cdp.detach()
+    except Exception:  # noqa: BLE001 - la descarga debe intentarse igualmente
+        logger.warning("no se pudo limpiar el estado local del portal", exc_info=True)
+
 
 class Navegador:
     """Envoltorio del contexto de Playwright con persistencia opcional.
@@ -106,6 +142,13 @@ class Navegador:
             self._contexto.set_default_navigation_timeout(self._configuracion.navigation_timeout_ms)
             paginas = self._contexto.pages
             self.pagina = paginas[0] if paginas else self._contexto.new_page()
+
+            # Un perfil reutilizado guarda en localStorage/IndexedDB un estado
+            # del portal que hace que el siguiente reCAPTCHA se rechace aunque
+            # el token sea recién generado por el navegador. Se limpia antes de
+            # navegar para que cada ejecución parta de un estado válido.
+            if self._modo_perfil:
+                limpiar_estado_captcha(self._contexto, self.pagina)
 
             return self
         except BaseException as error:
@@ -184,7 +227,18 @@ class Navegador:
             orden[1:1] = banderas_linux
         if self._configuracion.headless and sys.platform != "darwin":
             orden.insert(-1, "--headless=new")
+            # Con ``--user-agent`` Chrome sustituye también el UA de las
+            # peticiones que hace él mismo (no solo el de las que pide la
+            # página), así que el portal no lo distingue de un Chrome normal.
             orden.insert(-1, f"--user-agent={self._configuracion.user_agent or USER_AGENT_LINUX}")
+            # Chromium en headless lleva "HeadlessChrome" en el User-Agent y el
+            # portal lo rechaza (reCAPTCHA y WAF). Sin ventana real no hay forma
+            # de que Google emita un token válido, así que se avisa aquí en vez
+            # de dejar que falle la consulta más adelante.
+            logger.warning(
+                "el perfil dedicado en modo headless no supera el reCAPTCHA del portal: "
+                "use una ventana visible (headless: false o --visible) o Xvfb"
+            )
 
         logger.info("abriendo Chrome con el perfil dedicado", extra={"perfil": str(perfil), "puerto": puerto})
         self._log_chrome = tempfile.NamedTemporaryFile(  # noqa: SIM115 - se cierra en __exit__

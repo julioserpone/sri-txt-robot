@@ -10,10 +10,15 @@ reCAPTCHA) y **Descargar reporte** (entrega el TXT).
 Estrategia del captcha
 ----------------------
 
-1. Se pulsa "Consultar" y se deja que el propio navegador resuelva el
-   reCAPTCHA invisible. Es el flujo real del portal y no tiene coste.
-2. Si el portal rechaza el token, se resuelve con anti-captcha, se inyecta y se
-   envía la consulta con ``rcBuscar()``.
+El reCAPTCHA lo resuelve el propio navegador: se pulsa "Consultar" y el widget
+invisible genera el token en esta sesión, que es el único que el SRI acepta. Un
+token pedido a anti-captcha se puede inyectar, pero Google lo valida contra el
+navegador que hace la consulta y el portal responde "Captcha incorrecta".
+
+El perfil dedicado acumula estado local del portal (``localStorage`` e
+``IndexedDB``) que, en la siguiente ejecución, hace que Google emita tokens que
+el SRI rechaza. Por eso :class:`~sri_txt_robot.portal.session.Navegador` limpia
+ese estado al abrir el perfil, antes de iniciar sesión.
 
 La espera no es un ``sleep``: se escucha la respuesta de la consulta y solo se
 considera enviada cuando la petición lleva un ``g-recaptcha-response`` no
@@ -32,9 +37,6 @@ from pathlib import Path
 from playwright.sync_api import Download, Locator, Page, Response
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from ..captcha.anticaptcha import AntiCaptchaClient, SolucionCaptcha
-from ..captcha.inject import enviar_consulta, resolver_captcha
-from ..config import CaptchaConfig
 from ..logging import obtener_logger
 from ..manifest import nombre_xml
 from ..models import Periodo, TipoComprobante
@@ -52,9 +54,12 @@ _MAX_BYTES_TXT = 20 * 1024 * 1024
 #: Textos con los que el portal informa cada desenlace de la consulta.
 _TEXTO_SIN_DATOS = ("no existen datos", "no hay datos", "no se encontraron")
 _TEXTO_CAPTCHA = "captcha"
+_TEXTO_FECHA_FUTURA = "debe ser menor a la fecha actual"
 
-#: Detecta un envío de consulta que lleva token de reCAPTCHA.
-_PATRON_TOKEN_ENVIO = re.compile(r"g-recaptcha-response(?:-\d+)?=(?!&)([^&]{20,})")
+#: Detecta un envío de consulta que lleva token de reCAPTCHA. El token puede
+#: venir vacío (primer envío del portal, que siempre se rechaza) o largo (el
+#: envío del callback del widget); el primer grupo es el valor del token.
+_PATRON_TOKEN_ENVIO = re.compile(r"g-recaptcha-response(?:-\d+)?=([^&]*)")
 
 #: Tiempo máximo para ver el envío con token (el portal lo hace en ~250 ms).
 _ESPERA_RESPUESTA_MS = 20_000
@@ -65,6 +70,9 @@ _ESPERA_RESULTADO_MS = 15_000
 #: Margen en el que se ignora un aviso de captcha: el primer envío del portal
 #: va sin token y siempre se rechaza; el bueno llega unos 250 ms después.
 _GRACIA_CAPTCHA_MS = 1_500
+
+#: Texto que el portal devuelve cuando el token llega pero Google lo rechaza.
+_TEXTO_CAPTCHA_GOOGLE = "validar el captcha en google"
 
 
 class ConsultaSRIError(RuntimeError):
@@ -85,7 +93,6 @@ class ResultadoDescarga:
 
     contenido: bytes
     nombre_archivo: str
-    solucion: SolucionCaptcha | None = None
     url_consulta: str = ""
     origen_captcha: str = ""
 
@@ -190,8 +197,6 @@ def _ajustar_ruc(campo: Locator, ruc: str) -> None:
 def consultar_y_descargar(
     page: Page,
     selectores: Selectores,
-    cliente_captcha: AntiCaptchaClient | None,
-    configuracion_captcha: CaptchaConfig,
     directorio: Path,
     *,
     max_intentos: int = 3,
@@ -199,10 +204,12 @@ def consultar_y_descargar(
 ) -> ResultadoDescarga:
     """Consulta los comprobantes y descarga el reporte TXT.
 
-    Primero se deja que el navegador resuelva el captcha. Si el portal lo
-    rechaza y hay cliente de anti-captcha, se resuelve con el servicio y se
-    reintenta. Cada token dura unos dos minutos, así que se resuelve justo
-    antes de enviar.
+    El flujo es el del portal: se pulsa "Consultar" y el widget invisible de
+    reCAPTCHA genera un token en **este** navegador. Ese token es el único que
+    el SRI acepta; un token pedido a anti-captcha se inyecta pero Google lo
+    rechaza porque lo valida contra el navegador que hace la consulta. Si el
+    portal rechaza el token, se vuelve a pulsar "Consultar" para obtener uno
+    nuevo (3 intentos por defecto).
 
     Con ``descargar_txt=False`` la consulta se envía igual, pero no se pide el
     reporte: la tabla de resultados queda en pantalla para descargar los XML
@@ -212,34 +219,13 @@ def consultar_y_descargar(
         raise ConsultaSRIError("No se encontró el botón 'Consultar'. Revise los selectores 'consulta.consultar'.")
 
     ultimo_error: Exception | None = None
-    intentar_en_navegador = configuracion_captcha.intentar_en_navegador
 
     for intento in range(1, max_intentos + 1):
         logger.info("ejecutando consulta", extra={"intento": intento, "max_intentos": max_intentos})
 
-        solucion: SolucionCaptcha | None = None
-        origen = "navegador"
-
-        if intentar_en_navegador:
-            mecanismo = _pulsar_consultar(page, selectores)
-            if mecanismo:
-                logger.info("consulta enviada por el flujo del portal", extra={"mecanismo": mecanismo})
-        else:
-            if cliente_captcha is None:
-                raise ConsultaSRIError(
-                    "El portal rechazó el captcha del navegador y no hay clave de "
-                    "anti-captcha configurada. Defina ANTICAPTCHA_API_KEY o use un "
-                    "navegador con sesión real."
-                )
-            solucion = resolver_captcha(
-                page,
-                cliente_captcha,
-                configuracion_captcha,
-                sitekey_respaldo=selectores.valor("captcha", "sitekey"),
-                accion_respaldo=selectores.valor("captcha", "accion"),
-            )
-            enviar_consulta(page)
-            origen = solucion.task_type
+        mecanismo = _pulsar_consultar(page, selectores)
+        if mecanismo:
+            logger.info("consulta enviada por el flujo del portal", extra={"mecanismo": mecanismo})
 
         estado = _esperar_resultado(page, selectores)
 
@@ -249,18 +235,25 @@ def consultar_y_descargar(
             contenido, nombre = b"", ""
             if descargar_txt:
                 contenido, nombre = _descargar(page, selectores, directorio)
-            if solucion is not None and cliente_captcha is not None and configuracion_captcha.report_outcomes:
-                cliente_captcha.reportar_correcto(solucion.task_id)
             return ResultadoDescarga(
                 contenido=contenido,
                 nombre_archivo=nombre,
-                solucion=solucion,
                 url_consulta=page.url,
-                origen_captcha=origen,
+                origen_captcha="navegador",
             )
 
         if estado == "sin_datos":
             raise SinDatosError("El portal no tiene comprobantes para el período y tipo indicados.")
+
+        if estado == "error_fecha":
+            # El portal rechaza un día que aún no ha llegado (o un período
+            # posterior). Reintentar no cambia nada; para el mes completo hay
+            # que dejar el día en "Todos".
+            raise ConsultaSRIError(
+                "El portal rechazó la fecha consultada ('la fecha ingresada debe ser "
+                "menor a la fecha actual'). Use el mes completo con el día en 'Todos' "
+                "o elija un período anterior."
+            )
 
         if estado == "error_formulario":
             raise ConsultaSRIError(
@@ -271,16 +264,14 @@ def consultar_y_descargar(
         if estado != "captcha":
             raise ConsultaSRIError("El portal no devolvió resultados ni un aviso reconocible.")
 
-        # El captcha fue rechazado: se resuelve uno nuevo y se reintenta.
-        ultimo_error = ConsultaSRIError("El portal rechazó el token de reCAPTCHA.")
+        # El captcha fue rechazado: se vuelve a pulsar "Consultar" para que el
+        # widget entregue un token recién generado en este navegador.
+        ultimo_error = ConsultaSRIError(
+            "El portal rechazó el token de reCAPTCHA del navegador. Vuelva a ejecutar "
+            "'sri-txt-robot descargar'; si persiste, ejecute 'calentar' con el mismo "
+            "perfil para validarlo manualmente."
+        )
         logger.warning("captcha rechazado, reintentando", extra={"intento": intento})
-
-        if solucion is not None and cliente_captcha is not None and configuracion_captcha.report_outcomes:
-            cliente_captcha.reportar_incorrecto(solucion.task_id)
-
-        # Tras un rechazo, se pasa a anti-captcha aunque el primer intento haya
-        # sido del navegador.
-        intentar_en_navegador = False
 
     raise ultimo_error or ConsultaSRIError("No se pudo completar la consulta.")
 
@@ -291,11 +282,16 @@ def consultar_y_descargar(
 def _pulsar_consultar(page: Page, selectores: Selectores) -> str:
     """Pulsa "Consultar" y espera la respuesta de la consulta con token.
 
-    El portal hace dos envíos: uno inmediato **sin** token (que rechaza) y otro
-    unos 250 ms después con el token de reCAPTCHA. Se espera la respuesta del
-    segundo con ``expect_response``, que además bombea los eventos de Playwright;
-    un bucle con ``time.sleep`` no los entregaría y habría que agotar el tiempo
-    de espera en cada consulta.
+    El portal hace dos envíos: uno inmediato con el token **vacío** (que
+    rechaza) y otro unos 250 ms después con el token de reCAPTCHA. Se espera la
+    respuesta del segundo con ``expect_response``, que además bombea los eventos
+    de Playwright; un bucle con ``time.sleep`` no los entregaría y habría que
+    agotar el tiempo de espera en cada consulta.
+
+    La condición mira el **contenido** del campo y no solo su presencia: ambos
+    envíos llevan ``g-recaptcha-response``, así que quedarse con el primero
+    hacía leer el aviso de captcha del envío sin token antes de que llegara el
+    bueno.
     """
     boton = primer_visible(page, selectores.grupo("consulta", "consultar"), timeout_ms=10_000)
     if boton is None:
@@ -318,6 +314,11 @@ def _clasificar_mensaje(texto: str) -> str:
     """Traduce el aviso del portal a un estado del flujo."""
     if any(fragmento in texto for fragmento in _TEXTO_SIN_DATOS):
         return "sin_datos"
+    # La fecha se comprueba antes que el captcha: el portal muestra ambos
+    # avisos a la vez cuando el mes pedido no ha terminado y el primer envío
+    # (sin token) también se rechaza.
+    if _TEXTO_FECHA_FUTURA in texto:
+        return "error_fecha"
     if any(fragmento in texto for fragmento in _TEXTO_CAPTCHA):
         return "captcha"
     if texto:
@@ -343,12 +344,18 @@ def _esperar_resultado(page: Page, selectores: Selectores) -> str:
             return "ok"
 
         transcurrido_ms = (time.monotonic() - inicio) * 1000
-        estado = _clasificar_mensaje(_texto_mensajes(page, selectores))
+        mensaje = _texto_mensajes(page, selectores)
+        estado = _clasificar_mensaje(mensaje)
 
         # El primer envío (sin token) siempre muestra "captcha incorrecta"
         # mientras el navegador resuelve el reCAPTCHA y reenvía la consulta.
         if estado == "captcha" and transcurrido_ms < _GRACIA_CAPTCHA_MS:
             estado = ""
+
+        # Un aviso de captcha que viene de Google (token caducado o rechazado)
+        # no desaparece solo: esperar a que se repita solo alarga la consulta.
+        if estado == "captcha" and _TEXTO_CAPTCHA_GOOGLE in mensaje and transcurrido_ms >= _GRACIA_CAPTCHA_MS:
+            return estado
 
         if estado:
             repeticiones = repeticiones + 1 if estado == candidato else 1
@@ -396,7 +403,14 @@ def _texto_mensajes(page: Page, selectores: Selectores) -> str:
 
 
 def _es_consulta_con_token(respuesta: Response) -> bool:
-    """Indica si la respuesta corresponde a una consulta con token de reCAPTCHA."""
+    """Indica si la respuesta corresponde a una consulta **con** token de reCAPTCHA.
+
+    El portal envía primero la consulta con ``g-recaptcha-response`` vacío (el
+    ``onclick`` del botón dispara el captcha y el postback de PrimeFaces a la
+    vez). Solo el envío del callback del widget lleva un token real; quedarse
+    con el primero hace que el robot lea el rechazo de ese envío y dé la
+    consulta por fallida.
+    """
     request = respuesta.request
     if request.method != "POST" or "comprobantesRecibidos.jsf" not in request.url:
         return False
@@ -404,7 +418,7 @@ def _es_consulta_con_token(respuesta: Response) -> bool:
         datos = request.post_data or ""
     except Exception:  # noqa: BLE001
         return False
-    return bool(_PATRON_TOKEN_ENVIO.search(datos))
+    return any(_PATRON_TOKEN_ENVIO.findall(datos))
 
 
 def _esperar_formulario(page: Page, selectores: Selectores) -> None:
@@ -698,12 +712,16 @@ def _leer_clave_de_fila(fila: Locator, selectores: list[str]) -> str:
     """
     for sel in selectores:
         try:
-            for celda in fila.locator(sel).all():
-                texto = re.sub(r"\s+", "", celda.inner_text() or "")
-                if _PATRON_CLAVE_ACCESO.match(texto):
-                    return texto
+            celdas = fila.locator(sel).all()
         except Exception:  # noqa: BLE001
             continue
+        for celda in celdas:
+            try:
+                texto = re.sub(r"\s+", "", celda.inner_text() or "")
+            except Exception:  # noqa: BLE001
+                continue
+            if _PATRON_CLAVE_ACCESO.match(texto):
+                return texto
     return ""
 
 

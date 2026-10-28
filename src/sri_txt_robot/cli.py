@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from playwright.sync_api import Page
 from pydantic import SecretStr
 
 from .captcha.anticaptcha import AntiCaptchaClient
@@ -23,7 +24,7 @@ from .models import Periodo, TipoComprobante
 from .period import disponibilidad, sugerir_periodo
 from .pipeline import Opciones, Robot
 from .portal.login import iniciar_sesion
-from .portal.received import ConsultaSRIError, navegar_a_recibidos, texto_mensajes
+from .portal.received import ConsultaSRIError, configurar_filtros, navegar_a_recibidos, texto_mensajes
 from .portal.selectors import Selectores, primer_visible
 from .portal.session import Navegador
 from .storage import crear_almacenamiento
@@ -80,11 +81,14 @@ def descargar(
     ] = None,
     api_key: Annotated[
         str | None,
-        typer.Option("--api-key", help="Clave de anti-captcha. Opcional: el navegador suele bastar."),
+        typer.Option(
+            "--api-key",
+            help="Clave de anti-captcha (heredada). La descarga solo usa el token del navegador.",
+        ),
     ] = None,
     perfil: Annotated[
         str | None,
-        typer.Option("--perfil", help="Carpeta del perfil de Chrome calentado (ver 'calentar')."),
+        typer.Option("--perfil", help="Carpeta del perfil de Chrome dedicado (ver 'calentar')."),
     ] = None,
     salida: Annotated[
         str | None,
@@ -207,13 +211,13 @@ def calentar(
         typer.Option("--espera", help="Segundos que se espera la consulta manual."),
     ] = 300,
 ) -> None:
-    """Abre el perfil dedicado para que una persona resuelva el captcha una vez.
+    """Abre el perfil dedicado para resolver el captcha manualmente una vez.
 
-    El portal solo acepta tokens de reCAPTCHA de un perfil que haya recibido al
-    menos una consulta hecha por una persona. Después de ese clic, el perfil
-    queda habilitado y el robot puede consultar todos los períodos sin
-    intervención. Ejecute este comando una vez, haga una consulta a mano y
-    cierre la ventana cuando el comando termine.
+    El robot resuelve el reCAPTCHA solo con el navegador y limpia el estado
+    local del portal al abrir el perfil, así que normalmente no hace falta este
+    comando. Sirve para validar el perfil cuando el portal rechaza el captcha
+    de forma persistente o para comprobar que el login y los selectores
+    funcionan. Ejecútelo, haga una consulta a mano y el comando termina solo.
     """
     configurar_logging()
     configuracion = _construir_configuracion(
@@ -259,10 +263,11 @@ def calentar(
             catalogo.valor("login", "url") or portal.login_url,
         )
         navegar_a_recibidos(pagina, catalogo)
+        _preparar_consulta_manual(pagina, catalogo)
 
         typer.secho(
             "\nSe abrió Chrome con el perfil dedicado.\n"
-            "1) Elija un mes cerrado y 'Todos' en el campo día.\n"
+            "1) Deje el mes que ya aparece elegido y 'Todos' en el campo día.\n"
             "2) Pulse 'Consultar' a mano y espere los resultados.\n"
             "3) Vuelva a esta terminal: el comando termina solo.\n",
             fg=typer.colors.CYAN,
@@ -270,6 +275,7 @@ def calentar(
 
         limite = time.monotonic() + max(espera, 30)
         while time.monotonic() < limite:
+            mensaje = texto_mensajes(pagina, catalogo)
             filas = 0
             tabla = primer_visible(pagina, catalogo.grupo("consulta", "tabla_resultados"), timeout_ms=500)
             if tabla is not None:
@@ -277,22 +283,64 @@ def calentar(
                     filas = tabla.locator("tbody tr").count()
                 except Exception:  # noqa: BLE001
                     filas = 0
-            if filas or "no existen" in texto_mensajes(pagina, catalogo):
+
+            # Solo cuenta una consulta **aceptada** por el portal: una tabla con
+            # filas o el aviso de que el período no tiene datos. Un rechazo
+            # (captcha o fecha) no calienta nada y hay que verlo en la terminal.
+            if filas or "no existen" in mensaje:
                 typer.secho(
                     f"Perfil calentado: la consulta manual devolvió {filas} fila(s). "
                     "Las próximas ejecuciones serán automáticas.",
                     fg=typer.colors.GREEN,
                 )
                 return
+
+            if mensaje and _es_rechazo(mensaje):
+                typer.secho(
+                    f"\nEl portal rechazó la consulta manual: {mensaje[:300]}\n",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
+                if "captcha" in mensaje:
+                    typer.secho(
+                        "El perfil no quedó calentado. Vuelva a pulsar 'Consultar' en la "
+                        "ventana de Chrome, o cierre el comando y ejecute 'calentar' de nuevo.",
+                        fg=typer.colors.YELLOW,
+                        err=True,
+                    )
+                raise typer.Exit(code=1)
+
             time.sleep(2)
 
     typer.secho(
-        "No se detectó ninguna consulta manual dentro del plazo. "
+        "No se detectó ninguna consulta manual aceptada dentro del plazo. "
         "Vuelva a ejecutar 'calentar' y pulse 'Consultar' en la ventana de Chrome.",
         fg=typer.colors.YELLOW,
         err=True,
     )
     raise typer.Exit(code=1)
+
+
+def _preparar_consulta_manual(pagina: object, catalogo: Selectores) -> None:
+    """Deja el formulario listo para una consulta manual.
+
+    Se preselecciona el mes cerrado anterior con el día en *Todos* para que la
+    persona solo tenga que pulsar **Consultar** y el resultado sirva como
+    prueba completa del flujo.
+    """
+    if not isinstance(pagina, Page):
+        return
+
+    anio, mes = sugerir_periodo(date.today())
+    try:
+        configurar_filtros(pagina, catalogo, Periodo(anio=anio, mes=mes), TipoComprobante.FACTURA)
+    except ConsultaSRIError as error:
+        logger.debug("no se pudo preseleccionar el período de la consulta manual: %s", error)
+
+
+def _es_rechazo(mensaje: str) -> bool:
+    """Indica si el aviso del portal es un rechazo de la consulta."""
+    return "captcha" in mensaje or "fecha actual" in mensaje or "parámetro" in mensaje
 
 
 @app.command("periodo")

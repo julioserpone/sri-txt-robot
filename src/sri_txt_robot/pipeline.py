@@ -2,8 +2,8 @@
 
 El robot es **idempotente**: si el TXT de una combinación ya existe en el
 almacenamiento, no se vuelve a descargar salvo que se fuerce. Esto permite
-reintentar la invocación tras un fallo parcial sin duplicar gastos de
-anti-captcha ni volver a golpear el portal.
+reintentar la invocación tras un fallo parcial sin repetir consultas ni volver
+a golpear el portal.
 """
 
 from __future__ import annotations
@@ -14,8 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .captcha.anticaptcha import AntiCaptchaClient
-from .config import ConfigError, RobotConfig
+from .config import RobotConfig
 from .logging import obtener_logger
 from .manifest import extraer_claves, nombre_claves, nombre_manifiesto, nombre_txt
 from .models import ConfigRuc, Periodo, ResultadoDescarga, TipoComprobante
@@ -100,22 +99,6 @@ class Robot:
         # perfil ni descarga el bundle del navegador.
         self._preparar_runtime = preparar_runtime
         self._runtime_listo = False
-
-        # La clave de anti-captcha es opcional: si el navegador resuelve el
-        # captcha por su cuenta, no hace falta. Solo se exige cuando hay que
-        # recurrir al servicio.
-        try:
-            clave_captcha = configuracion.captcha.resolver_api_key()
-        except ConfigError:
-            clave_captcha = ""
-            logger.warning(
-                "sin clave de anti-captcha: solo se intentará el captcha del navegador",
-                extra={"variable": configuracion.captcha.api_key_env},
-            )
-
-        self._cliente_captcha = (
-            AntiCaptchaClient(clave_captcha, api_url=configuracion.captcha.api_url) if clave_captcha else None
-        )
 
     def ejecutar(self, opciones: Opciones) -> Resumen:
         """Ejecuta el robot para todos los RUC configurados."""
@@ -257,8 +240,6 @@ class Robot:
             descarga: DescargaPortal = consultar_y_descargar(
                 pagina,
                 self._selectores,
-                self._cliente_captcha,
-                self._configuracion.captcha,
                 directorio,
                 max_intentos=opciones.max_intentos_captcha,
                 descargar_txt=not txt_ya_existia,

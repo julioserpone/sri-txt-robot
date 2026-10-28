@@ -124,3 +124,92 @@ def test_si_falla_el_arranque_se_detiene_playwright(
         navegador.__enter__()
 
     assert playwright.detenido is True
+
+
+class _CdpFalso:
+    """Doble de ``CDPSession`` que anota los comandos enviados."""
+
+    def __init__(self) -> None:
+        self.enviados: list[tuple[str, dict[str, str]]] = []
+        self.detachado = False
+
+    def send(self, metodo: str, parametros: dict[str, str]) -> None:
+        self.enviados.append((metodo, parametros))
+
+    def detach(self) -> None:
+        self.detachado = True
+
+
+class _ContextoFalso:
+    def __init__(self, cdp: _CdpFalso) -> None:
+        self._cdp = cdp
+        self.pagina_recibida: object | None = None
+
+    def new_cdp_session(self, pagina: object) -> _CdpFalso:
+        self.pagina_recibida = pagina
+        return self._cdp
+
+
+def test_limpiar_estado_captcha_borra_local_storage_e_indexeddb() -> None:
+    """El estado del portal que invalida el reCAPTCHA se borra por CDP."""
+    cdp = _CdpFalso()
+    contexto = _ContextoFalso(cdp)
+    pagina = object()
+
+    session.limpiar_estado_captcha(cast(object, contexto), cast(object, pagina))
+
+    assert contexto.pagina_recibida is pagina
+    assert cdp.enviados == [
+        (
+            "Storage.clearDataForOrigin",
+            {"origin": session.ORIGEN_PORTAL, "storageTypes": "local_storage,indexeddb"},
+        )
+    ]
+    assert cdp.detachado is True
+
+
+def test_limpiar_estado_captcha_no_aborta_si_cdp_falla() -> None:
+    """Un CDP sin ``Storage`` solo deja el comportamiento anterior."""
+
+    class _ContextoRoto:
+        def new_cdp_session(self, pagina: object) -> object:
+            del pagina
+            raise RuntimeError("sin CDP")
+
+    session.limpiar_estado_captcha(cast(object, _ContextoRoto()), cast(object, object()))
+
+
+class _ContextoNavegadorFalso(_ContextoFalso):
+    """Doble de ``BrowserContext`` suficiente para ``Navegador.__enter__``."""
+
+    def __init__(self, cdp: _CdpFalso) -> None:
+        super().__init__(cdp)
+        self.pages: list[object] = []
+
+    def new_page(self) -> object:
+        return object()
+
+    def set_default_timeout(self, valor: int) -> None:
+        del valor
+
+    def set_default_navigation_timeout(self, valor: int) -> None:
+        del valor
+
+
+def test_el_perfil_dedicado_limpia_el_estado_al_abrir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El perfil reutilizado se limpia antes de iniciar sesión."""
+    playwright = _PlaywrightFalso()
+    monkeypatch.setattr(session, "sync_playwright", lambda: _SyncPlaywrightFalso(playwright))
+
+    contexto = _ContextoNavegadorFalso(_CdpFalso())
+
+    navegador = Navegador(PortalConfig(perfil_dir="/tmp/perfil-sri"))
+    limpiezas: list[tuple[object, object]] = []
+    monkeypatch.setattr(navegador, "_abrir_perfil", lambda: contexto)
+    monkeypatch.setattr(session, "limpiar_estado_captcha", lambda c, p: limpiezas.append((c, p)))
+
+    navegador.__enter__()
+
+    assert limpiezas == [(contexto, navegador.pagina)]

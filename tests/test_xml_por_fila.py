@@ -221,7 +221,6 @@ def test_una_celda_sin_formato_de_clave_no_se_usa_como_nombre(tmp_path: Path) ->
 
 def test_consulta_sin_descargar_txt_deja_la_tabla_en_pantalla(monkeypatch) -> None:
     """``descargar_txt=False`` envía la consulta pero no pide el reporte TXT."""
-    from sri_txt_robot.config import CaptchaConfig
     from sri_txt_robot.portal import received
 
     monkeypatch.setattr(received, "primer_visible", lambda *_a, **_k: MagicMock())
@@ -236,8 +235,6 @@ def test_consulta_sin_descargar_txt_deja_la_tabla_en_pantalla(monkeypatch) -> No
     resultado = received.consultar_y_descargar(
         MagicMock(url="https://portal"),
         _selectores(),
-        None,
-        CaptchaConfig(),
         Path("/tmp/sri-test-xml"),
         descargar_txt=False,
     )
