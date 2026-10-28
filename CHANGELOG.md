@@ -13,6 +13,11 @@ Todos los cambios relevantes se documentan aquí. El formato sigue
   la variante manual y cómo comprobar el `status` del callback.
 
 ### Corregido
+- **Un reintento vaciaba el manifiesto del período**: si el TXT ya estaba en
+  S3, la ejecución no descargaba nada y reescribía `manifest.json` con
+  `descargas: []`. Se perdía el detalle de los archivos ya guardados y la
+  conciliación por S3 se quedaba sin referencias. Ahora el manifiesto se
+  fusiona con el anterior y conserva una entrada por tipo de comprobante.
 - **El perfil reutilizado invalidaba el reCAPTCHA**: tras una consulta aceptada,
   el portal deja datos en `localStorage` e `IndexedDB` de
   `https://srienlinea.sri.gob.ec`; en la siguiente sesión Google emitía tokens

@@ -44,6 +44,26 @@ def _ahora() -> str:
     return datetime.now(tz=UTC).isoformat()
 
 
+def _fusionar_descargas(
+    anteriores: dict[str, Any] | None,
+    nuevas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Combina las descargas del manifiesto previo con las de esta ejecución.
+
+    Queda una entrada por tipo de comprobante y gana la más reciente, que es la
+    de ``nuevas``. Así una ejecución que no descarga nada (porque todo estaba en
+    S3) no borra el detalle de lo que sí se guardó antes.
+    """
+    por_tipo: dict[str, dict[str, Any]] = {}
+    for descarga in (anteriores or {}).get("descargas", []):
+        if isinstance(descarga, dict) and descarga.get("tipo"):
+            por_tipo[str(descarga["tipo"])] = descarga
+    for descarga in nuevas:
+        if descarga.get("tipo"):
+            por_tipo[str(descarga["tipo"])] = descarga
+    return [por_tipo[tipo] for tipo in sorted(por_tipo)]
+
+
 @dataclass(frozen=True, slots=True)
 class Opciones:
     """Parámetros de una ejecución del robot."""
@@ -366,14 +386,21 @@ class Robot:
         )
 
     def _guardar_manifiesto(self, ruc: str, periodo: Periodo, resumen: Resumen) -> None:
-        """Guarda el manifiesto del período con el detalle de las descargas."""
-        descargas = [
+        """Guarda el manifiesto del período con el detalle de las descargas.
+
+        Se combina con el manifiesto anterior: una ejecución idempotente no
+        vuelve a descargar lo que ya está en S3 y, sin la fusión, el manifiesto
+        se reescribía vacío y se perdía el detalle de lo descargado antes.
+        """
+        clave = nombre_manifiesto(ruc, periodo.clave, ambiente=self._ambiente())
+        nuevas = [
             resultado.a_dict()
             for resultado in resumen.resultados
             if resultado.ruc == ruc and resultado.periodo.clave == periodo.clave
         ]
+        descargas = _fusionar_descargas(self._almacenamiento.leer_json(clave), nuevas)
         self._almacenamiento.guardar_json(
-            nombre_manifiesto(ruc, periodo.clave, ambiente=self._ambiente()),
+            clave,
             {
                 "ambiente": self._ambiente(),
                 "ruc": ruc,
