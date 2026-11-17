@@ -96,6 +96,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 tipos=tipos,
                 ruc=_texto(event.get("ruc")),
                 forzar=bool(event.get("forzar", False)),
+                event_id=event_id,
+                run_id=_texto(event.get("run_id")),
             )
         )
 

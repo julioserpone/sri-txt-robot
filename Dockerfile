@@ -26,6 +26,7 @@ RUN dnf install -y \
         at-spi2-atk \
         at-spi2-core \
         cups-libs \
+        libatomic \
         libdrm \
         libXcomposite \
         libXdamage \

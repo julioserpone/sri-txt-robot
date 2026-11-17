@@ -74,6 +74,8 @@ class Opciones:
     forzar: bool = False
     max_intentos_captcha: int = 3
     descargar_xmls: bool = True
+    event_id: str = ""
+    run_id: str = ""
 
 
 @dataclass(slots=True)
@@ -214,7 +216,7 @@ class Robot:
                                 resumen,
                                 txt_ya_existia=txt_ya_existia.get((periodo.clave, tipo.value), False),
                             )
-                        self._guardar_manifiesto(ruc.ruc, periodo, resumen)
+                        self._guardar_manifiesto(ruc.ruc, periodo, resumen, opciones)
                 finally:
                     # Se cierra la sesión siempre, incluso si una descarga falló.
                     if cerrar_sesion(pagina, self._selectores):
@@ -385,31 +387,57 @@ class Robot:
             },
         )
 
-    def _guardar_manifiesto(self, ruc: str, periodo: Periodo, resumen: Resumen) -> None:
+    def _guardar_manifiesto(self, ruc: str, periodo: Periodo, resumen: Resumen, opciones: Opciones) -> None:
         """Guarda el manifiesto del período con el detalle de las descargas.
 
         Se combina con el manifiesto anterior: una ejecución idempotente no
         vuelve a descargar lo que ya está en S3 y, sin la fusión, el manifiesto
         se reescribía vacío y se perdía el detalle de lo descargado antes.
+
+        A partir de esta versión el manifiesto registra la identidad de la
+        ejecución (origen, event_id, run_id) y un histórico de ejecuciones, para
+        que la app pueda distinguir una ejecución propia de una reutilización de
+        archivos viejos o de una ejecución manual.
         """
         clave = nombre_manifiesto(ruc, periodo.clave, ambiente=self._ambiente())
+        anterior = self._almacenamiento.leer_json(clave)
         nuevas = [
             resultado.a_dict()
             for resultado in resumen.resultados
             if resultado.ruc == ruc and resultado.periodo.clave == periodo.clave
         ]
-        descargas = _fusionar_descargas(self._almacenamiento.leer_json(clave), nuevas)
-        self._almacenamiento.guardar_json(
-            clave,
-            {
-                "ambiente": self._ambiente(),
-                "ruc": ruc,
-                "periodo": periodo.clave,
-                "generadoEn": _ahora(),
-                "descargas": descargas,
-                "totalClaves": sum(descarga["totalClaves"] for descarga in descargas),
-            },
-        )
+        descargas = _fusionar_descargas(anterior, nuevas)
+
+        origen = "autotributo" if (opciones.event_id or opciones.run_id) else "manual"
+        ejecucion = {
+            "origen": origen,
+            "iniciado_en": None,
+            "finalizado_en": _ahora(),
+            "estado": (
+                "ok" if not resumen.fallos
+                else ("partial" if (resumen.resultados or resumen.omitidos or resumen.sin_datos) else "failed")
+            ),
+            "generadoEn": _ahora(),
+        }
+        if opciones.event_id:
+            ejecucion["event_id"] = opciones.event_id
+        if opciones.run_id:
+            ejecucion["run_id"] = opciones.run_id
+
+        historico = list((anterior or {}).get("ejecuciones", []))
+        historico.append(ejecucion)
+
+        manifiesto = {
+            "ambiente": self._ambiente(),
+            "ruc": ruc,
+            "periodo": periodo.clave,
+            "generadoEn": _ahora(),
+            "descargas": descargas,
+            "totalClaves": sum(descarga["totalClaves"] for descarga in descargas),
+            "ejecucion": ejecucion,
+            "ejecuciones": historico,
+        }
+        self._almacenamiento.guardar_json(clave, manifiesto)
 
     def _ambiente(self) -> str:
         """Ambiente de los datos (dev, test o produccion)."""
