@@ -124,6 +124,7 @@ class Robot:
 
     def ejecutar(self, opciones: Opciones) -> Resumen:
         """Ejecuta el robot para todos los RUC configurados."""
+        self._inicio = datetime.now(tz=UTC)
         resumen = Resumen()
 
         rucs = [ruc for ruc in self._configuracion.rucs_activos() if not opciones.ruc or ruc.ruc == opciones.ruc]
@@ -409,9 +410,10 @@ class Robot:
         descargas = _fusionar_descargas(anterior, nuevas)
 
         origen = "autotributo" if (opciones.event_id or opciones.run_id) else "manual"
+        inicio = getattr(self, "_inicio", None)
         ejecucion = {
             "origen": origen,
-            "iniciado_en": None,
+            "iniciado_en": inicio.isoformat() if inicio is not None else None,
             "finalizado_en": _ahora(),
             "estado": (
                 "ok" if not resumen.fallos
